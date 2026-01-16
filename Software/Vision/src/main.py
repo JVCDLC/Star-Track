@@ -1,53 +1,56 @@
 import cv2
 import numpy as np
 
-img = cv2.imread("image_focus_moon.png", cv2.IMREAD_GRAYSCALE)
+cap = cv2.VideoCapture(0)
 
-# Resize
-scale = 0.3
-resized = cv2.resize(
-    img,
-    (int(img.shape[1]*scale), int(img.shape[0]*scale)),
-    interpolation=cv2.INTER_AREA
-)
+while True:
+    ret, frame = cap.read()
+    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-# Blur (remove noise)
-blur = cv2.GaussianBlur(resized, (5, 5), 0)
+    # Blur (remove noise)
+    blur = cv2.GaussianBlur(gray_frame, (5, 5), 0)
 
-# Binary
-_, binary = cv2.threshold(
-    blur, 0, 255,
-    cv2.THRESH_BINARY + cv2.THRESH_OTSU
-)
+    # Binary (make it black and white to optimise calculation)
+    #this fonction is the real one. The other one is for test only
+    #_, binary = cv2.threshold(blur, 200, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, binary = cv2.threshold(blur, 80, 255, cv2.THRESH_BINARY)
+    #Bitwise is added to do test with a white paper
+    binary = cv2.bitwise_not(binary)
 
-# Invert if needed (objet noir sur fond blanc)
-# binary = cv2.bitwise_not(binary)
+    # Contours
+    contours, _ = cv2.findContours(binary,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
 
-# Contours
-contours, _ = cv2.findContours(
-    binary,
-    cv2.RETR_EXTERNAL,
-    cv2.CHAIN_APPROX_SIMPLE
-)
+    if len(contours) == 0:
+        print("no contours found")
+        exit()
 
-if len(contours) == 0:
-    print("Aucun contour détecté")
-    exit()
+    # Largest contour (circle / semi-circle)
+    cnt = max(contours, key=cv2.contourArea)
 
-# Largest contour (circle / semi-circle)
-cnt = max(contours, key=cv2.contourArea)
+    (x, y), radius = cv2.minEnclosingCircle(cnt)
 
-# Center (moments)
-M = cv2.moments(cnt)
-cx = int(M["m10"] / M["m00"])
-cy = int(M["m01"] / M["m00"])
+    diametre = 2 * radius
 
-# Draw center
-output = cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR)
-cv2.circle(output, (cx, cy), 6, (0, 0, 255), -1)
+    # Center (moments)
+    M = cv2.moments(cnt)
+    cx = int(M["m10"] / M["m00"]) # m00 is the aire and m10 is aire*cx
+    cy = int(M["m01"] / M["m00"]) # m00 is the aire and m01 is aire*cy
 
-# Display
-cv2.imshow("Binary", binary)
-cv2.imshow("Detected center", output)
-cv2.waitKey(0)
+    # Draw center
+    output = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)
+    cv2.circle(output, (cx, cy), 6, (0, 0, 255), -1)
+    # Draw detection circle
+    cv2.circle(output,(int(x), int(y)),int(radius),(0, 255, 0),2)
+    # Draw size
+    cv2.putText(output,f"D={diametre}px",(int(x - radius), int(y - radius - 10)),
+        cv2.FONT_HERSHEY_SIMPLEX,0.6,(255, 0, 0),2)
+
+    # Display
+    cv2.imshow("Webcam", binary)
+    cv2.imshow("Tracking", output)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+cap.release()
 cv2.destroyAllWindows()
+
+
