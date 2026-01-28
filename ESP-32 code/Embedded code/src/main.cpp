@@ -1,65 +1,42 @@
 #include <Arduino.h>
-#include <Arduino.h>
+#include "motor_constants.hpp"
 
-// ==========================
-// ENCODER
-// ==========================
-#define ENC_A 34
-#define ENC_B 35
-#define TICKS_PER_REV 48
-volatile long encoderCount = 0;
-volatile uint8_t prevState = 0;
-const int8_t quadTable[16] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
-
-// ==========================
-// BTS7960 Motor Driver
-// ==========================
-#define RPWM 25
-#define LPWM 26
-#define REN  27
-#define LEN  14
-#define PWM_CH_R 0
-#define PWM_CH_L 1
-#define PWM_FREQ 20000
-#define PWM_RES 10
-
-const int pwm_max_driver = 1023;
-int pwm_min_real = 0; // PWM minimal required to move the motor
-const int pwm_start_test = 150; // PWM minimal to start test
+int DEC_pwm_min_real = 0; // PWM minimal required to move the motor
+volatile long DEC_encoderCount = 0;
+volatile uint8_t DEC_prevState = 0;
 
 // ==========================
 // Control variable
 // ==========================
-double gearbox = 50.0;
-double Kp = 12.0;   // coefficient P
-double target_degree = 0; // modified via motor_angle()
-long target_ticks = 0;
-float angle_motor=0;
+double DEC_target_degree = 0; // modified via motor_angle()
+long DEC_target_ticks = 0;
+double DEC_prevErrorDeg = 0.0;
+unsigned long DEC_prevTime = 0;
 
 
 void drive_motor(int pwm) { // Send PWM to the motor
   pwm = constrain(pwm, -pwm_max_driver, pwm_max_driver);
-  if(pwm > 0){ ledcWrite(PWM_CH_R, pwm); ledcWrite(PWM_CH_L,0);}
-  else if(pwm < 0){ ledcWrite(PWM_CH_R,0); ledcWrite(PWM_CH_L,-pwm);}
-  else {ledcWrite(PWM_CH_R,0); ledcWrite(PWM_CH_L,0);}
+  if(pwm > 0){ ledcWrite(DEC_PWM_CH_R, pwm); ledcWrite(DEC_PWM_CH_L,0);}
+  else if(pwm < 0){ ledcWrite(DEC_PWM_CH_R,0); ledcWrite(DEC_PWM_CH_L,-pwm);}
+  else {ledcWrite(DEC_PWM_CH_R,0); ledcWrite(DEC_PWM_CH_L,0);}
 }
 // ==========================
 // Interuption handler for encoder
 // ==========================
 void IRAM_ATTR ISR_Encoder() {
-  uint8_t a = digitalRead(ENC_A);
-  uint8_t b = digitalRead(ENC_B);
+  uint8_t a = digitalRead(DEC_ENC_A);
+  uint8_t b = digitalRead(DEC_ENC_B);
   uint8_t state = (a << 1) | b;
-  uint8_t index = (prevState << 2) | state;
-  encoderCount += quadTable[index];
-  prevState = state;
+  uint8_t index = (DEC_prevState << 2) | state;
+  DEC_encoderCount += quadTable[index];
+  DEC_prevState = state;
 }
 // ==========================
 // Read encoder value and make sure no interrupt create problem
 // ==========================
 long encoder_reading() {
   noInterrupts();
-  long pos = encoderCount;
+  long pos = DEC_encoderCount;
   interrupts();
   return pos;
 }
@@ -118,35 +95,44 @@ int findMinimumPWM(int repetitions = 3) {
 // FONCTIONS DE CONTROLE
 // ==========================
 void motor_angle(double deg) {
-  target_degree = deg;
-  target_ticks = target_degree * gearbox * TICKS_PER_REV / 360.0;
+  DEC_target_degree = deg;
+  DEC_target_ticks = DEC_target_degree * DEC_gearbox * TICKS_PER_REV / 360.0;
 }
-
-// Appelée très souvent dans loop()
 void update_motor() {
+  unsigned long now = millis();
+  double dt = (now - DEC_prevTime) / 1000.0; // secondes
+  if (dt <= 0) dt = 0.001; // sécurité
+
   long pos = encoder_reading();
-  long errorTicks = target_ticks - pos;
-  double errorDeg = errorTicks * 360.0 / TICKS_PER_REV / gearbox;
+  long errorTicks = DEC_target_ticks - pos;
+  double errorDeg = errorTicks * 360.0 / TICKS_PER_REV / DEC_gearbox;
 
-  int pwm = Kp * errorDeg;
+  // ----- D term -----
+  double dError = (errorDeg - DEC_prevErrorDeg) / dt;
 
-  // If pwm too low, force it to be minimal pwm
-  if(pwm > 0 && pwm < pwm_min_real) pwm = pwm_min_real;
-  if(pwm < 0 && pwm > -pwm_min_real) pwm = -pwm_min_real;
+  // ----- PD control -----
+  double pwm_f = DEC_Kp * errorDeg + DEC_Kd * dError;
+  int pwm = (int)pwm_f;
 
-  // Deadzone 
-  //if(abs(errorTicks) <= 1) pwm = 0; // ±1 tick
+  // ----- PWM limits -----
+  pwm = constrain(pwm, -pwm_max_driver, pwm_max_driver);
+
+  // Minimal PWM to overcome friction
+  if (pwm > 0 && pwm < DEC_pwm_min_real) pwm = DEC_pwm_min_real;
+  if (pwm < 0 && pwm > -DEC_pwm_min_real) pwm = -DEC_pwm_min_real;
 
   drive_motor(pwm);
 
-  // Display values
-  Serial.print("Pos ticks: "); Serial.print(pos);
-  Serial.print(" | Target ticks: "); Serial.print(target_ticks);
-  Serial.print(" | Err ticks: "); Serial.print(errorTicks);
-  Serial.print(" | Pos deg: "); Serial.print(pos*360.0/TICKS_PER_REV/gearbox,2);
-  Serial.print(" | Err deg: "); Serial.print(errorDeg,2);
+  // ----- Save state -----
+  DEC_prevErrorDeg = errorDeg;
+  DEC_prevTime = now;
+
+  // ----- Debug (optionnel) -----
+  Serial.print("Err(deg): "); Serial.print(errorDeg, 3);
+  Serial.print(" | dErr: "); Serial.print(dError, 3);
   Serial.print(" | PWM: "); Serial.println(pwm);
 }
+
 
 // ==========================
 // SETUP
@@ -155,26 +141,26 @@ void setup() {
   Serial.begin(115200);
   delay(500);
 
-  pinMode(ENC_A, INPUT_PULLUP);
-  pinMode(ENC_B, INPUT_PULLUP);
-  prevState = (digitalRead(ENC_A) << 1) | digitalRead(ENC_B);
-  attachInterrupt(digitalPinToInterrupt(ENC_A), ISR_Encoder, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENC_B), ISR_Encoder, CHANGE);
-  encoderCount = 0;
+  pinMode(DEC_ENC_A, INPUT_PULLUP);
+  pinMode(DEC_ENC_B, INPUT_PULLUP);
+  DEC_prevState = (digitalRead(DEC_ENC_A) << 1) | digitalRead(DEC_ENC_B);
+  attachInterrupt(digitalPinToInterrupt(DEC_ENC_A), ISR_Encoder, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(DEC_ENC_B), ISR_Encoder, CHANGE);
+  DEC_encoderCount = 0;
 
-  pinMode(REN, OUTPUT);
-  pinMode(LEN, OUTPUT);
-  digitalWrite(REN,HIGH);
-  digitalWrite(LEN,HIGH);
+  pinMode(DEC_REN, OUTPUT);
+  pinMode(DEC_LEN, OUTPUT);
+  digitalWrite(DEC_REN,HIGH);
+  digitalWrite(DEC_LEN,HIGH);
 
-  ledcSetup(PWM_CH_R,PWM_FREQ,PWM_RES);
-  ledcSetup(PWM_CH_L,PWM_FREQ,PWM_RES);
-  ledcAttachPin(RPWM,PWM_CH_R);
-  ledcAttachPin(LPWM,PWM_CH_L);
+  ledcSetup(DEC_PWM_CH_R,PWM_FREQ,PWM_RES);
+  ledcSetup(DEC_PWM_CH_L,PWM_FREQ,PWM_RES);
+  ledcAttachPin(DEC_RPWM,DEC_PWM_CH_R);
+  ledcAttachPin(DEC_LPWM,DEC_PWM_CH_L);
 
   Serial.println("Systeme pret - detection automatique du PWM minimal");
-  pwm_min_real = findMinimumPWM(3);
-  Serial.print("PWM minimal initialise: "); Serial.println(pwm_min_real);
+  DEC_pwm_min_real = findMinimumPWM(3);
+  Serial.print("PWM minimal initialise: "); Serial.println(DEC_pwm_min_real);
 
   // Initial position
   motor_angle(0); 
@@ -216,6 +202,3 @@ void loop() {
     }
   }
 }
-
-
-

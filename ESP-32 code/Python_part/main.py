@@ -43,12 +43,12 @@ time.sleep(2)  # wait for esp-32 to reset
 try:
     while True:
         # 120.15 degrees
-        send_request_motor(ser, Motor.RIGHT_ASCENSION, 0.45)
-        time.sleep(1)
+        send_request_motor(ser, Motor.RIGHT_ASCENSION, 360)
+        time.sleep(2)
 
         # 0 degres
         send_request_motor(ser, Motor.RIGHT_ASCENSION, 0.0)
-        time.sleep(1)
+        time.sleep(2)
 
 # stop if user touch a key
 except KeyboardInterrupt:
