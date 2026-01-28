@@ -28,8 +28,8 @@ const int8_t quadTable[16] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
 #define DEC_PWM_CH_L 1
 
 // Motor constants
-const double DEC_gearbox = 50.0;
-const double DEC_Kp = 12.0;   // coefficient P
+const double DEC_gearbox = 900.0;
+const double DEC_Kp = 100.0;   // coefficient P
 const double DEC_Kd = 0.005;
 ////////////////////////////////////////////////////////////////
 /////////// Pin definitions MOTOR RIGHT ASCENSION (RA)
@@ -47,8 +47,8 @@ const double DEC_Kd = 0.005;
 #define RA_PWM_CH_L 1
 
 // Motor constants
-const double RA_gearbox = 50.0;
-const double RA_Kp = 12.0;   // coefficient P
+const double RA_gearbox = 500.0;
+const double RA_Kp = 15.0;   // coefficient P
 const double RA_Kd = 0.005;
 
 #endif // MOTOR_CONSTANTS_HPP

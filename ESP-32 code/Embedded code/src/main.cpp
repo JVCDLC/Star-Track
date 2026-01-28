@@ -128,9 +128,10 @@ void update_motor() {
   DEC_prevTime = now;
 
   // ----- Debug (optionnel) -----
-  Serial.print("Err(deg): "); Serial.print(errorDeg, 3);
-  Serial.print(" | dErr: "); Serial.print(dError, 3);
-  Serial.print(" | PWM: "); Serial.println(pwm);
+  char buf[64];
+  snprintf(buf, sizeof(buf),"STAT, Error degres %.3f, Error ticks %.3f, PWM %d", errorDeg, dError, pwm);
+  Serial.println(buf);
+
 }
 
 
