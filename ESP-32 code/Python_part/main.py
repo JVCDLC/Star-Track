@@ -1,3 +1,5 @@
+from asyncio import wait
+
 import serial
 import time
 from enum import Enum
@@ -18,14 +20,15 @@ def send_request_motor(ser, motor: Motor, position: float, timeout=1.0) -> bool:
     start_time = time.time()
     while time.time() - start_time < timeout:
         if ser.in_waiting:
-            reply = ser.readline().decode().strip()
-            print("RX:", reply)
 
             # Succes if we ave a answer
-            if reply.startswith("ACK"):
-                return True
-            else:
-                return False
+            reply = ser.readline().decode().strip()
+            while not(reply.startswith("ACK")):
+                reply = ser.readline().decode().strip()
+                print("RX:", reply)
+                time.sleep(0.001)
+            return True
+
 
     # timeout took too much time to have answer, should implement: send a new message if no answer
     print("RX: timeout")
@@ -34,18 +37,18 @@ def send_request_motor(ser, motor: Motor, position: float, timeout=1.0) -> bool:
 
 # For Linux(Raspberry pi)
 #ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
-ser = serial.Serial('COM8', 115200, timeout=1)
+ser = serial.Serial('COM5', 115200, timeout=1)
 time.sleep(2)  # wait for esp-32 to reset
 
 try:
     while True:
         # 120.15 degrees
-        send_request_motor(ser, Motor.RIGHT_ASCENSION, 120.15)
-        time.sleep(5)
+        send_request_motor(ser, Motor.RIGHT_ASCENSION, 0.45)
+        time.sleep(1)
 
         # 0 degres
         send_request_motor(ser, Motor.RIGHT_ASCENSION, 0.0)
-        time.sleep(5)
+        time.sleep(1)
 
 # stop if user touch a key
 except KeyboardInterrupt:
