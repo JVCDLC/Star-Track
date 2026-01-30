@@ -56,14 +56,19 @@ reader_thread = threading.Thread(target=serial_reader, args=(ser,), daemon=True)
 reader_thread.start()
 
 try:
+    target=0.0
     while True:
-        # 120.15 degrees
-        send_request_motor(ser, Motor.RIGHT_ASCENSION, 180)
-        time.sleep(5)
-
-        # 0 degres
-        send_request_motor(ser, Motor.RIGHT_ASCENSION, 0.0)
-        time.sleep(5)
+        send_request_motor(ser, Motor.RIGHT_ASCENSION, target)
+        time.sleep(1)
+        target += 0.0416
+        #
+        # # 120.15 degrees
+        # send_request_motor(ser, Motor.RIGHT_ASCENSION, 180)
+        # time.sleep(5)
+        #
+        # # 0 degres
+        # send_request_motor(ser, Motor.RIGHT_ASCENSION, 0.0)
+        # time.sleep(5)
 
 # stop if user touch a key
 except KeyboardInterrupt:
