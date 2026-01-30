@@ -1,2 +1,5 @@
 numpy
 opencv-python
+pandas
+skyfield
+pyserial
