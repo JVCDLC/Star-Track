@@ -33,9 +33,9 @@ class Telescope:
     def __str__(self):
         return (f"A telescope with a focal length of {self.focal_length_mm} mm,\n"
                 f"an eye piece focal length of {self.eye_piece_focal_length_mm} mm\n"
-                f"and an eye piece field of view of {self.field_of_view_deg} deg \n"
+                f"and an eye piece field of view of {self.eye_piece_field_of_view_deg} deg \n"
                 f"has a magnification of x{self.magnification}\n"
-                f"and a field of view of {self.field_of_view_deg} deg\n.")
+                f"and a field of view of {self.field_of_view_deg} deg.")
     def get_celestial_body_proportion(self, celestial_body: CelestialBody) -> float:
         return celestial_body.field_of_view_deg / self.field_of_view_deg
     def print_celestial_body_proportion(self, celestial_body: CelestialBody):
@@ -50,7 +50,7 @@ class Telescope:
 
 
 def main():
-    TELESCOPE: Telescope = Telescope(400, 25, 50)
+    TELESCOPE: Telescope = Telescope(400, 10, 62)
     SUN: CelestialBody = CelestialBody("Sun", 1_390_000, 150_000_000)
     MOON: CelestialBody = CelestialBody("Moon", 3_475, 384_400)
     JUPITER: CelestialBody = CelestialBody("Jupiter", 139_820, 800_000_000)
@@ -58,7 +58,11 @@ def main():
     MERCURY: CelestialBody = CelestialBody("Mercury", 4_879, 77_000_000)
     URANUS: CelestialBody = CelestialBody("Uranus", 50_724, 2_800_000_000)
 
+
     TELESCOPE.print_celestial_body_view(MOON)
+    print(TELESCOPE)
+    MOON.print_field_of_view_deg()
+    JUPITER.print_field_of_view_deg()
 
 
 if __name__ == "__main__":
