@@ -1,0 +1,238 @@
+{
+  "objects": [
+    {
+      "name": "M31",
+      "type": "Galaxy",
+      "ra_hours": 0.712,
+      "dec_degrees": 41.269,
+      "mag": 3.4,
+      "comment": "Andromède très facile"
+    },
+    {
+      "name": "M32",
+      "type": "Galaxy",
+      "ra_hours": 0.713,
+      "dec_degrees": 40.865,
+      "mag": 8.1,
+      "comment": "Compagne de M31"
+    },
+    {
+      "name": "M110",
+      "type": "Galaxy",
+      "ra_hours": 0.673,
+      "dec_degrees": 41.685,
+      "mag": 8.0,
+      "comment": "Compagne de M31"
+    },
+    {
+      "name": "M34",
+      "type": "Open Cluster",
+      "ra_hours": 2.708,
+      "dec_degrees": 42.75,
+      "mag": 5.5,
+      "comment": "Amas ouvert facile"
+    },
+    {
+      "name": "M36",
+      "type": "Open Cluster",
+      "ra_hours": 5.6,
+      "dec_degrees": 34.14,
+      "mag": 6.3,
+      "comment": "Très beau amas"
+    },
+    {
+      "name": "M37",
+      "type": "Open Cluster",
+      "ra_hours": 5.87,
+      "dec_degrees": 32.55,
+      "mag": 5.6,
+      "comment": "Un des plus beaux"
+    },
+    {
+      "name": "M38",
+      "type": "Open Cluster",
+      "ra_hours": 5.48,
+      "dec_degrees": 35.85,
+      "mag": 6.4,
+      "comment": "Amas large"
+    },
+    {
+      "name": "M41",
+      "type": "Open Cluster",
+      "ra_hours": 6.767,
+      "dec_degrees": -20.733,
+      "mag": 4.5,
+      "comment": "Visible même en ville"
+    },
+    {
+      "name": "M42",
+      "type": "Nebula",
+      "ra_hours": 5.59,
+      "dec_degrees": -5.45,
+      "mag": 4.0,
+      "comment": "Nébuleuse d'Orion spectaculaire"
+    },
+    {
+      "name": "M44",
+      "type": "Open Cluster",
+      "ra_hours": 8.667,
+      "dec_degrees": 19.667,
+      "mag": 3.1,
+      "comment": "Amas de la Crèche"
+    },
+    {
+      "name": "M45",
+      "type": "Open Cluster",
+      "ra_hours": 3.783,
+      "dec_degrees": 24.117,
+      "mag": 1.6,
+      "comment": "Pléiades"
+    },
+    {
+      "name": "M46",
+      "type": "Open Cluster",
+      "ra_hours": 7.7,
+      "dec_degrees": -14.817,
+      "mag": 6.1,
+      "comment": "Amas riche"
+    },
+    {
+      "name": "M47",
+      "type": "Open Cluster",
+      "ra_hours": 7.617,
+      "dec_degrees": -14.483,
+      "mag": 4.4,
+      "comment": "Amas brillant"
+    },
+    {
+      "name": "M48",
+      "type": "Open Cluster",
+      "ra_hours": 8.217,
+      "dec_degrees": -5.8,
+      "mag": 5.5,
+      "comment": "Facile"
+    },
+    {
+      "name": "M50",
+      "type": "Open Cluster",
+      "ra_hours": 7.033,
+      "dec_degrees": -8.333,
+      "mag": 5.9,
+      "comment": "Amas compact"
+    },
+    {
+      "name": "M51",
+      "type": "Galaxy",
+      "ra_hours": 13.5,
+      "dec_degrees": 47.2,
+      "mag": 8.4,
+      "comment": "Galaxie du Tourbillon"
+    },
+    {
+      "name": "M52",
+      "type": "Open Cluster",
+      "ra_hours": 23.267,
+      "dec_degrees": 61.6,
+      "mag": 6.9,
+      "comment": "Très haut au Québec"
+    },
+    {
+      "name": "M57",
+      "type": "Nebula",
+      "ra_hours": 18.9,
+      "dec_degrees": 33.033,
+      "mag": 8.8,
+      "comment": "Nébuleuse de la Lyre"
+    },
+    {
+      "name": "M65",
+      "type": "Galaxy",
+      "ra_hours": 11.3,
+      "dec_degrees": 13.083,
+      "mag": 9.3,
+      "comment": "Facile dans le Lion"
+    },
+    {
+      "name": "M66",
+      "type": "Galaxy",
+      "ra_hours": 11.333,
+      "dec_degrees": 12.983,
+      "mag": 8.9,
+      "comment": "Facile dans le Lion"
+    },
+    {
+      "name": "M81",
+      "type": "Galaxy",
+      "ra_hours": 9.933,
+      "dec_degrees": 69.067,
+      "mag": 6.9,
+      "comment": "Très facile au Québec"
+    },
+    {
+      "name": "M82",
+      "type": "Galaxy",
+      "ra_hours": 9.933,
+      "dec_degrees": 69.683,
+      "mag": 8.4,
+      "comment": "Très facile au Québec"
+    },
+    {
+      "name": "M92",
+      "type": "Globular Cluster",
+      "ra_hours": 17.283,
+      "dec_degrees": 43.133,
+      "mag": 6.4,
+      "comment": "Facile"
+    },
+    {
+      "name": "M13",
+      "type": "Globular Cluster",
+      "ra_hours": 16.7,
+      "dec_degrees": 36.467,
+      "mag": 5.8,
+      "comment": "Le plus beau globulaire"
+    },
+    {
+      "name": "M3",
+      "type": "Globular Cluster",
+      "ra_hours": 13.7,
+      "dec_degrees": 28.383,
+      "mag": 6.2,
+      "comment": "Très lumineux"
+    },
+    {
+      "name": "M27",
+      "type": "Nebula",
+      "ra_hours": 19.983,
+      "dec_degrees": 22.717,
+      "mag": 7.4,
+      "comment": "Nébuleuse Dumbbell"
+    },
+    {
+      "name": "M56",
+      "type": "Globular Cluster",
+      "ra_hours": 19.283,
+      "dec_degrees": 30.183,
+      "mag": 8.3,
+      "comment": "Facile"
+    },
+    {
+      "name": "M71",
+      "type": "Globular Cluster",
+      "ra_hours": 19.9,
+      "dec_degrees": 18.783,
+      "mag": 8.2,
+      "comment": "Facile"
+    },
+    {
+      "name": "M103",
+      "type": "Open Cluster",
+      "ra_hours": 1.533,
+      "dec_degrees": 60.7,
+      "mag": 7.4,
+      "comment": "Très haut au Québec"
+    }
+  ]
+}
+
+

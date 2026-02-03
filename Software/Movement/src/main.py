@@ -13,6 +13,13 @@
 from numpy import angle
 from skyfield.api import load, Star, wgs84
 from skyfield.data import hipparcos
+import csv
+from pathlib import Path
+
+# Chemin vers le fichier CSV depuis src/
+csv_path = Path(__file__).resolve().parent.parent / "data" / "messier_qc.csv"
+
+
 
 with load.open(hipparcos.URL) as f:
     stars = hipparcos.load_dataframe(f)
@@ -35,50 +42,47 @@ observer = earth + wgs84.latlon(latitude, longitude)
 temperature = 15.0 #degrees Celsius
 pressure = 1005.0 #mbar
 #-------------------------------------------------------------------------------------------#
-#Classes
-        
-class CoordinateOfCelestialBody:   
-    """
-    Class to store celestial body coordinate information
-    Attributes:
-        ha : Hour Angle of the celestial body
-        dec : Declination of the celestial body
 
-    Methods:
-        __init__(self, ha=0.0, dec=0.0):
-            Initializes the coordinateOfCelestialBody object with hour angle and declination.
-        updateCoordinates(self, newHa, newDec):
-            Updates the hour angle and declination of the celestial body.
-        
-    """
-    def __init__(self,body, bodyName = 'name', ha=0.0, dec=0.0):
-        self.bodyName = bodyName
-        self.body = body
-        self.updateCoordinates()
-
-    def updateCoordinates(self):
-        """
-        Updates the hour angle and declination of the celestial body.
-        Inputs: newHa : New hour angle in degrees
-                newDec : New declination in degrees
-        Outputs: None
-        """
-        ha , dec = print_HaDec(self.body,self.bodyName)
-        self.ha = ha
-        self.dec = dec
-        return
-    def convertDegreeToMotorPositions(self): #jp a dit pas nécessaire
-        """
-            Converts the hour angle and declination in degrees to motor positions.
-            Inputs: None
-            Outputs: motorPosition : Motor position in steps
-        """
-        gearRatio = 10 # Gear ratio
-        motorEncoderStepsPerRevolution = 2050 # Motor encoder steps per revolution
-        motorPosition = self*gearRatio* motorEncoderStepsPerRevolution/360
-        return motorPosition
+celestialBodies = {
+    'Sun':planets['sun'],
+    'Moon':planets['moon'],
+    'Mercury':planets['mercury'],
+    'Venus':planets['venus'],
+    'Mars':planets['mars'],
+    'Jupiter':planets['jupiter barycenter'],
+    'Saturn':planets['saturn barycenter'],
+    'Uranus':planets['uranus barycenter'],
+    'Neptune':planets['neptune barycenter'],
+    'Polaris':polaris
+}
 
 
+messier = {}
+
+with open(csv_path, newline='', encoding='utf-8') as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        star = Star(
+            ra_hours=float(row['ra_hours']),
+            dec_degrees=float(row['dec_degrees'])
+        )
+        messier[row['name']] = {
+            'type': row['type'],
+            'mag': float(row['mag']),
+            'comment': row['comment'],
+            'star': star
+        }
+
+m31 = messier['M31']['star']
+"""# Exemple : obtenir la position de M31
+# Exemple : obtenir la position de M31
+earth = load('de421.bsp')['earth']
+m31 = messier['M31']['star']
+astrometric = earth.at(t).observe(m31)
+ra, dec, distance = astrometric.radec()
+
+print("M31 RA:", ra)
+print("M31 Dec:", dec)"""
 #-------------------------------------------------------------------------------------------#
 #Functions
 def updateLocation(lat,lon):
@@ -92,6 +96,22 @@ def updateLocation(lat,lon):
     observer = earth + wgs84.latlon(lat, lon)
     return
 
+
+
+def isVisible(CB):
+    """
+        Check if a celestial body is visible from the observer location
+        Inputs: CB : Celestial Body object from skyfield
+        Outputs: True if the celestial body is above the horizon, False otherwise
+    """
+    observerInfo = observer.at(currentTime).observe(CB).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure)
+    altitude = observerInfo[0].degrees
+    if altitude > 0:
+        print("the object is visible, altitude :", altitude)
+        return True
+    else:
+        print("the object is not visible, altitude :", altitude)
+        return False
 
 def print_HaDec(CB,name=''):
     """
@@ -118,8 +138,8 @@ def main():
 
     a=print_HaDec(jupiter,'Jupiter')
     print("angle en degree : \n ha : ",a[0], " \n dec : ",a[1])
-   
-
+    print_HaDec(polaris,'Polaris')
+    print_HaDec(m31,'M31')
 
 #---------------------------#
 if __name__ == '__main__':
