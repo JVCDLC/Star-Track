@@ -9,6 +9,7 @@
 #define PWM_RES 10
 const int pwm_start_test = 150; // PWM minimal to start test
 const int pwm_max_driver = 1023;
+const int repetitions = 3; // number of time to test minimum PWM
 const int8_t quadTable[16] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
 
 ////////////////////////////////////////////////////////////////
@@ -29,8 +30,9 @@ const int8_t quadTable[16] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
 
 // Motor constants
 const double DEC_gearbox = 900.0;
-const double DEC_Kp = 100.0;   // coefficient P
-const double DEC_Kd = 0.005;
+const double DEC_Kp = 100.0;   // Proportional gain
+const double DEC_Ki = 0.1;     // Integral gain
+const double DEC_Kd = 0.005;   // Derivative gain
 ////////////////////////////////////////////////////////////////
 /////////// Pin definitions MOTOR RIGHT ASCENSION (RA)
 ////////////////////////////////////////////////////////////////
@@ -48,7 +50,9 @@ const double DEC_Kd = 0.005;
 
 // Motor constants
 const double RA_gearbox = 500.0;
-const double RA_Kp = 15.0;   // coefficient P
-const double RA_Kd = 0.005;
+const double RA_Kp = 15.0;    // Proportional gain
+const double RA_Ki = 0.1;     // Integral gain
+const double RA_Kd = 0.005;   // Derivative gain
+
 
 #endif // MOTOR_CONSTANTS_HPP
