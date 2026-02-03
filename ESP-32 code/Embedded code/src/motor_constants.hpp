@@ -41,7 +41,7 @@ const double DEC_Kd = 0.005;   // Derivative gain
 #define RA_ENC_B 22 //brown
 
 // BTS7960 Motor Driver
-#define RA_RPWM 15 //green
+#define RA_RPWM 17 //green
 #define RA_LPWM 18 //yellow
 #define RA_REN  19 //blue
 #define RA_LEN  21 //orange
@@ -50,7 +50,7 @@ const double DEC_Kd = 0.005;   // Derivative gain
 
 // Motor constants
 const double RA_gearbox = 500.0;
-const double RA_Kp = 15.0;    // Proportional gain
+const double RA_Kp = 100.0;    // Proportional gain
 const double RA_Ki = 0.1;     // Integral gain
 const double RA_Kd = 0.005;   // Derivative gain
 

@@ -58,17 +58,19 @@ reader_thread.start()
 try:
     target=0.0
     while True:
-        send_request_motor(ser, Motor.RIGHT_ASCENSION, target)
-        time.sleep(1)
-        target += 0.0416
+        # send_request_motor(ser, Motor.RIGHT_ASCENSION, target)
+        # time.sleep(1)
+        # target += 0.0416
         #
-        # # 120.15 degrees
-        # send_request_motor(ser, Motor.RIGHT_ASCENSION, 180)
-        # time.sleep(5)
-        #
-        # # 0 degres
-        # send_request_motor(ser, Motor.RIGHT_ASCENSION, 0.0)
-        # time.sleep(5)
+        # 120.15 degrees
+        send_request_motor(ser, Motor.RIGHT_ASCENSION, 45)
+        send_request_motor(ser, Motor.DECLIMATION, 45)
+        time.sleep(5)
+
+        # 0 degres
+        send_request_motor(ser, Motor.RIGHT_ASCENSION, 0.0)
+        send_request_motor(ser, Motor.DECLIMATION, 0.0)
+        time.sleep(5)
 
 # stop if user touch a key
 except KeyboardInterrupt:
