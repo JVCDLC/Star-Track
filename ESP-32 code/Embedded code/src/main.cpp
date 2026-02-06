@@ -85,7 +85,7 @@ int DEC_find_minimum_PWM() {
   while (pwm <= pwm_max_driver) {
     pwm += step;
 
-    long startPos = DEC_encoder_reading();  // 🔴 ICI
+    long startPos = DEC_encoder_reading();
     DEC_drive_motor(pwm);
 
     Serial.print("Testing PWM: ");
@@ -106,12 +106,12 @@ int DEC_find_minimum_PWM() {
 }
 int RA_find_minimum_PWM() {
   int step = 5;
-  int pwm = 400 + step;
+  int pwm = pwm_start_test + step;
 
   while (pwm <= pwm_max_driver) {
     pwm += step;
 
-    long startPos = RA_encoder_reading();  // 🔴 ICI
+    long startPos = RA_encoder_reading();
     RA_drive_motor(pwm);
 
     Serial.print("Testing PWM: ");

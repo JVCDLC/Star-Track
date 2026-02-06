@@ -49,7 +49,7 @@ def send_request_motor(ser, motor: Motor, position: float, timeout=1.0) -> bool:
 
 # For Linux(Raspberry pi)
 #ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=0)
-ser = serial.Serial('COM5', 115200, timeout=0)
+ser = serial.Serial('COM9', 115200, timeout=0)
 time.sleep(2)  # wait for esp-32 to reset
 
 reader_thread = threading.Thread(target=serial_reader, args=(ser,), daemon=True)

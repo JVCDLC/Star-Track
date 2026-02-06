@@ -42,7 +42,7 @@ const double DEC_Kd = 0.005;   // Derivative gain
 
 // BTS7960 Motor Driver
 #define RA_RPWM 17 //green
-#define RA_LPWM 18 //yellow
+#define RA_LPWM 15 //yellow
 #define RA_REN  19 //blue
 #define RA_LEN  21 //orange
 #define RA_PWM_CH_R 2
