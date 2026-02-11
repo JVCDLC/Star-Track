@@ -3,6 +3,7 @@ import time
 import threading
 from queue import Queue
 from enum import Enum
+import msvcrt
 
 
 class Motor(Enum):
@@ -25,10 +26,14 @@ def serial_reader(ser):
         else:
             time.sleep(0.001)
 
+def send_request_motor(ser, motor: Motor, position: float):
+    message = f"REQUEST,{motor.name},{position}\n"
+    ser.write(message.encode())
+    #print("TX:", message.strip())
 
 ### send motor and angle to esp-32.  wait for the answer back from the esp32
 #   REQUEST,MOTOR,180.1234\n
-def send_request_motor(ser, motor: Motor, position: float, timeout=1.0) -> bool:
+def send_request_motor2(ser, motor: Motor, position: float, timeout=1.0) -> bool:
     message = f"REQUEST,{motor.name},{position}\n"
     ser.write(message.encode())
     print("TX:", message.strip())
@@ -55,8 +60,58 @@ time.sleep(2)  # wait for esp-32 to reset
 reader_thread = threading.Thread(target=serial_reader, args=(ser,), daemon=True)
 reader_thread.start()
 
+ra_pos = 0.0
+dec_pos = 0.0
+
+speed_factor = 1.0
+speed_step = 0.2
+min_speed = 0.2
+max_speed = 3.0
+
+
 try:
     target=0.0
+    while True:
+
+        if msvcrt.kbhit():
+            key = msvcrt.getch().lower()
+            #print("key pressed:", key)
+
+            # Test with key control
+            if key == b'w':
+                dec_pos += speed_factor
+                send_request_motor(ser, Motor.DECLIMATION, dec_pos)
+
+            elif key == b's':
+                dec_pos -= speed_factor
+                send_request_motor(ser, Motor.DECLIMATION, dec_pos)
+
+            elif key == b'a':
+                ra_pos -= speed_factor
+                send_request_motor(ser, Motor.RIGHT_ASCENSION, ra_pos)
+
+            elif key == b'd':
+                ra_pos += speed_factor
+                send_request_motor(ser, Motor.RIGHT_ASCENSION, ra_pos)
+
+            elif key == b'\xe0':
+                arrow = msvcrt.getch()
+
+                if arrow == b'H':  # up arrow
+                    speed_factor += speed_step
+                    if speed_factor > max_speed:
+                        speed_factor = max_speed
+                    print("Speed:", speed_factor)
+
+                elif arrow == b'P':  # down arrow
+                    speed_factor -= speed_step
+                    if speed_factor < min_speed:
+                        speed_factor = min_speed
+                    print("Speed:", speed_factor)
+
+        time.sleep(0.01)
+
+    """
     while True:
         # send_request_motor(ser, Motor.RIGHT_ASCENSION, target)
         # time.sleep(1)
@@ -71,7 +126,7 @@ try:
         send_request_motor(ser, Motor.RIGHT_ASCENSION, 0.0)
         send_request_motor(ser, Motor.DECLIMATION, 0.0)
         time.sleep(5)
-
+        """
 # stop if user touch a key
 except KeyboardInterrupt:
     print("stop")

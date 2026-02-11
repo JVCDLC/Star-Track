@@ -88,16 +88,22 @@ int DEC_find_minimum_PWM() {
     long startPos = DEC_encoder_reading();
     DEC_drive_motor(pwm);
 
-    Serial.print("Testing PWM: ");
+    Serial.print("Testing DEC PWM: ");
     Serial.println(pwm);
 
-    delay(300); // un peu plus long
+    delay(200); // un peu plus long
 
     long delta = abs(DEC_encoder_reading() - startPos);
     if (delta >= 5) {
       DEC_drive_motor(0);
       delay(200);
       return pwm;
+    }
+    else if(pwm > DEC_pwm_start_max) {
+      Serial.println("PWM too high, retest...");
+      Serial.println("Check if nothing is blocking the motor and if the motor is properly powered");
+      delay(2000);
+      pwm = pwm_start_test;
     }
   }
 
@@ -114,7 +120,7 @@ int RA_find_minimum_PWM() {
     long startPos = RA_encoder_reading();
     RA_drive_motor(pwm);
 
-    Serial.print("Testing PWM: ");
+    Serial.print("Testing RA PWM: ");
     Serial.println(pwm);
 
     delay(300); // un peu plus long
@@ -124,6 +130,12 @@ int RA_find_minimum_PWM() {
       RA_drive_motor(0);
       delay(200);
       return pwm;
+    }
+    else if(pwm > RA_pwm_start_max) {
+      Serial.println("PWM too high, retest...");
+      Serial.println("Check if nothing is blocking the motor and if the motor is properly powered");
+      delay(2000);
+      pwm = pwm_start_test;
     }
   }
 
@@ -136,35 +148,27 @@ int RA_find_minimum_PWM() {
 // ==========================
 void calibrate_minimum_PWM() {
   DEC_pwm_min_real = 0;
-  RA_pwm_min_real = 0;
   for(int i=0; i<repetitions; i++) {
     int DEC_pwm = 0;
     Serial.print("Test "); Serial.print(i+1); Serial.println(" off PWM minimal...");
     DEC_pwm = DEC_find_minimum_PWM();
-    // if(DEC_pwm > pwm_max_driver/2) {
-    //   Serial.println("PWM too high, retest...");
-    //   delay(500);
-    // }
     if(DEC_pwm > DEC_pwm_min_real) {
       DEC_pwm_min_real = DEC_pwm;
     }
+  }
+  RA_pwm_min_real = 0;
+  for(int i=0; i<repetitions; i++) {
     int RA_pwm = 0;
-
     Serial.print("Test "); Serial.print(i+1); Serial.println(" off PWM minimal...");
     RA_pwm = RA_find_minimum_PWM();
-    // if(RA_pwm > pwm_max_driver/2) {
-    //   Serial.println("PWM too high, retest...");
-    //   delay(500);
-    // }
     if(RA_pwm > RA_pwm_min_real) {
       RA_pwm_min_real = RA_pwm;
     }
-
-
-    Serial.print("DEC PWM detecte: "); Serial.println(DEC_pwm);
-    Serial.print("RA PWM detecte: "); Serial.println(RA_pwm);
-    delay(200);
   }
+  Serial.print("DEC PWM detecte: "); Serial.println(DEC_pwm_min_real);
+  Serial.print("RA PWM detecte: "); Serial.println(RA_pwm_min_real);
+  delay(200);
+  
 }
 
 // ==========================
@@ -213,7 +217,7 @@ void DEC_update_motor() {
   // Debug output
   char buf_dec[128];
   snprintf(buf_dec, sizeof(buf_dec), "DEC - Target: %.2f° | Error: %.3f° | PWM: %d", DEC_target_degree, error_deg, pwm);
-  Serial.println(buf_dec);
+  //Serial.println(buf_dec);
 
   // Save state
   DEC_prevErrorDeg = error_deg;
@@ -266,7 +270,7 @@ void RA_update_motor() {
   // Debug output
   char buf_ra[128];
   snprintf(buf_ra, sizeof(buf_ra), "RA  - Target: %.2f° | Error: %.3f° | PWM: %d", RA_target_degree, error_deg, pwm);
-  Serial.println(buf_ra);
+  //Serial.println(buf_ra);
 
   // Save state
   RA_prevErrorDeg = error_deg;
@@ -354,6 +358,7 @@ void setup() {
   // Initial position
   set_motor_dec_angle(0);
   set_motor_ra_angle(0);
+
 }
 
 // ==========================
