@@ -14,6 +14,8 @@ class Motor(Enum):
 
 rx_queue = Queue()
 running = True
+speed_values = [0.00833, 0.05, 0.1, 0.5, 1, 3]
+speed_index = 1  # start at 0.1
 
 
 def serial_reader(ser):
@@ -63,10 +65,8 @@ reader_thread.start()
 ra_pos = 0.0
 dec_pos = 0.0
 
-speed_factor = 1.0
-speed_step = 0.2
-min_speed = 0.2
-max_speed = 3.0
+speed_factor = speed_values[speed_index]
+
 
 
 try:
@@ -96,17 +96,16 @@ try:
 
             elif key == b'\xe0':
                 arrow = msvcrt.getch()
-
                 if arrow == b'H':  # up arrow
-                    speed_factor += speed_step
-                    if speed_factor > max_speed:
-                        speed_factor = max_speed
+                    if speed_index < len(speed_values) - 1:
+                        speed_index += 1
+                        speed_factor = speed_values[speed_index]
                     print("Speed:", speed_factor)
 
                 elif arrow == b'P':  # down arrow
-                    speed_factor -= speed_step
-                    if speed_factor < min_speed:
-                        speed_factor = min_speed
+                    if speed_index > 0:
+                        speed_index -= 1
+                        speed_factor = speed_values[speed_index]
                     print("Speed:", speed_factor)
 
         time.sleep(0.01)
