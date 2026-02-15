@@ -4,6 +4,7 @@
 ////////////////////////////////////////////////////////////////
 /////////// Global Motor constants
 ////////////////////////////////////////////////////////////////
+
 #define TICKS_PER_REV 48
 #define PWM_FREQ 20000
 #define PWM_RES 10
@@ -34,9 +35,11 @@ const double DEC_gearbox = 900.0;
 const double DEC_Kp = 100.0;   // Proportional gain
 const double DEC_Ki = 0.1;     // Integral gain
 const double DEC_Kd = 0.005;   // Derivative gain
+
 ////////////////////////////////////////////////////////////////
 /////////// Pin definitions MOTOR RIGHT ASCENSION (RA)(ORANGE)
 ////////////////////////////////////////////////////////////////
+
 // Encoder pins
 #define RA_ENC_A 23 //yellow
 #define RA_ENC_B 22 //brown

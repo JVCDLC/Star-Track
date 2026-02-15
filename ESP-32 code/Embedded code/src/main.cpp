@@ -294,6 +294,7 @@ void set_motor_dec_angle(double deg) {
 void set_motor_ra_angle(double deg) {
   RA_target_degree = deg;
   RA_target_ticks = RA_target_degree * RA_gearbox * TICKS_PER_REV / 360.0;
+  
   RA_integralError = 0.0; // Reset integral term on new target
 }
 
