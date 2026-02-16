@@ -1,33 +1,33 @@
 import cv2
 import numpy as np
 
-def analyse(image_path):
+def find_center(image_path):
 
     image = cv2.imread(image_path)
     if image is None:
-        print("Erreur image")
+        print("Can't read image")
         return None
 
-    # 🔥 1) Downscale pour accélérer
+    # Down scale for optimisation(50%)
     scale = 0.5
     small = cv2.resize(image, None, fx=scale, fy=scale)
 
     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
-    # 🔥 2) Blur léger (pas trop fort pour garder le bord net)
+    # small blur
     blurred = cv2.GaussianBlur(gray, (5,5), 1.5)
 
-    # 🔥 3) Threshold automatique (Otsu)
+    # automatic threshold
     _, thresh = cv2.threshold(
         blurred, 0, 255,
         cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
 
-    # 🔥 4) Nettoyage morphologique
+    # cleaning
     kernel = np.ones((5,5), np.uint8)
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
-    # 🔥 5) Trouver contours
+    # find countour
     contours, _ = cv2.findContours(
         thresh,
         cv2.RETR_EXTERNAL,
@@ -35,37 +35,76 @@ def analyse(image_path):
     )
 
     if not contours:
-        print("Pas de contour")
+        print("not contour found")
         return None
 
-    # 🔥 6) Prendre le plus grand contour
+    # take the biggest countour
     largest = max(contours, key=cv2.contourArea)
 
-    # 🔥 7) Cercle minimum englobant
+    # smallest circle that still can be around the target
     (x, y), radius = cv2.minEnclosingCircle(largest)
 
-    # 🔥 Remettre à l'échelle originale
+    # put back to scale
     x = int(x / scale)
     y = int(y / scale)
-    radius = int(radius / scale)
 
-    centre = (x, y)
-    diametre = 2 * radius
+    center = (x, y)
 
-    print("Centre:", centre)
-    print("Diametre:", diametre)
+    print("Center:", center)
 
-    # 🔥 Affichage debug
     output = image.copy()
-    cv2.circle(output, centre, radius, (0,255,0), 2)
-    cv2.circle(output, centre, 3, (0,0,255), -1)
+    cv2.circle(output, center, 3, (0, 0, 255), -1)
+    display = cv2.resize(output, None, fx=0.5, fy=0.5)
 
-    cv2.imshow("Detection", output)
+    cv2.imshow("Detection", display)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-    return centre, diametre
+    return center
 
-# Exemple d'appel
+
+def focus_score(image_path):
+
+    image = cv2.imread(image_path)
+    if image is None:
+        print("Can't read image")
+        return None
+
+    # Downscale for performance
+    scale = 0.5
+    small = cv2.resize(image, None, fx=scale, fy=scale)
+
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+    # masque to remove the black background
+    _, mask = cv2.threshold(
+        gray, 0, 255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+
+    masked = cv2.bitwise_and(gray, gray, mask=mask)
+
+    # calculate the focus
+    laplacian = cv2.Laplacian(masked, cv2.CV_64F)
+    focus = laplacian.var()
+
+    print(f"{image_path} Raw focus score: {focus:.2f}")
+
+
+    return focus
+
 if __name__ == "__main__":
-    analyse("test_data/lune_2fev/2026-02-03-0416_6-CapObj_0001.PNG")
+    find_center("test_data/lune_2fev/moon_focus.PNG")
+    find_center("test_data/lune_2fev/moon_not_focus.PNG")
+    find_center("test_data/lune_2fev/moon_not_center.PNG")
+    find_center("test_data/lune_2fev/moon_not_center1.PNG")
+
+    focus_score("test_data/lune_2fev/moon_focus.PNG")
+    focus_score("test_data/lune_2fev/moon_focus1.PNG")
+    focus_score("test_data/lune_2fev/moon_focus2.PNG")
+    focus_score("test_data/lune_2fev/moon_focus3.PNG")
+    focus_score("test_data/lune_2fev/moon_half_focus.PNG")
+    focus_score("test_data/lune_2fev/moon_not_focus.PNG")
+    focus_score("test_data/lune_2fev/moon_not_focus1.PNG")
+    focus_score("test_data/lune_2fev/moon_not_focus2.PNG")
+    focus_score("test_data/lune_2fev/moon_not_focus3.PNG")
