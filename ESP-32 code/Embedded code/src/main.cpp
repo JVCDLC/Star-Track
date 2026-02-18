@@ -28,22 +28,42 @@ void DEC_drive_motor(int pwm) { // Send PWM to the motor
   digitalWrite(DEC_REN, HIGH);
   digitalWrite(DEC_LEN, HIGH);
   pwm = constrain(pwm, -pwm_max_driver, pwm_max_driver);
-  if(pwm > 0){ ledcWrite(DEC_PWM_CH_R, pwm); ledcWrite(DEC_PWM_CH_L,0);}
-  else if(pwm < 0){ ledcWrite(DEC_PWM_CH_R,0); ledcWrite(DEC_PWM_CH_L,-pwm);}
-  else {ledcWrite(DEC_PWM_CH_R,0); ledcWrite(DEC_PWM_CH_L,0);}
+  if(pwm > 0){ 
+    analogWrite(DEC_RPWM, pwm); 
+    analogWrite(DEC_LPWM, 0);
+  }
+  else if(pwm < 0){ 
+    analogWrite(DEC_RPWM, 0); 
+    analogWrite(DEC_LPWM, -pwm);
+  }
+  else {
+    analogWrite(DEC_RPWM, 0); 
+    analogWrite(DEC_LPWM, 0);
+  }
+
 }
 void RA_drive_motor(int pwm) { // Send PWM to the motor
   digitalWrite(RA_REN, HIGH);
   digitalWrite(RA_LEN, HIGH);
   pwm = constrain(pwm, -pwm_max_driver, pwm_max_driver);
-  if(pwm > 0){ ledcWrite(RA_PWM_CH_R, pwm); ledcWrite(RA_PWM_CH_L,0);}
-  else if(pwm < 0){ ledcWrite(RA_PWM_CH_R,0); ledcWrite(RA_PWM_CH_L,-pwm);}
-  else {ledcWrite(RA_PWM_CH_R,0); ledcWrite(RA_PWM_CH_L,0);}
+  if(pwm > 0){ 
+    analogWrite(RA_RPWM, pwm); 
+    analogWrite(RA_LPWM, 0);
+  }
+  else if(pwm < 0){ 
+    analogWrite(RA_RPWM, 0); 
+    analogWrite(RA_LPWM, -pwm);
+  }
+  else {
+    analogWrite(RA_RPWM, 0); 
+    analogWrite(RA_LPWM, 0);
+  }
+
 }
 // ==========================
 // Interuption handler for encoder
 // ==========================
-void IRAM_ATTR ISR_Encoder_DEC() {
+void ISR_Encoder_DEC() {
   uint8_t a = digitalRead(DEC_ENC_A);
   uint8_t b = digitalRead(DEC_ENC_B);
   uint8_t state = (a << 1) | b;
@@ -51,7 +71,7 @@ void IRAM_ATTR ISR_Encoder_DEC() {
   DEC_encoderCount += quadTable[index];
   DEC_prevState = state;
 }
-void IRAM_ATTR ISR_Encoder_RA() {
+void ISR_Encoder_RA() {
   uint8_t a = digitalRead(RA_ENC_A);
   uint8_t b = digitalRead(RA_ENC_B);
   uint8_t state = (a << 1) | b;
@@ -79,8 +99,8 @@ long RA_encoder_reading() {
 // Find minimum PWM to rotate motor
 // ==========================
 int DEC_find_minimum_PWM() {
-  int step = 5;
-  int pwm = pwm_start_test - step;
+  int step = 1;
+  int pwm = 50 - step;
 
   while (pwm <= pwm_max_driver) {
     pwm += step;
@@ -111,8 +131,8 @@ int DEC_find_minimum_PWM() {
   return pwm_max_driver;
 }
 int RA_find_minimum_PWM() {
-  int step = 5;
-  int pwm = pwm_start_test + step;
+  int step = 1;
+  int pwm = 50 - step;
 
   while (pwm <= pwm_max_driver) {
     pwm += step;
@@ -303,6 +323,14 @@ void set_motor_ra_angle(double deg) {
 // SETUP
 // ==========================
 void setup() {
+  // ==========================
+  // SET UP the timers for silent PWM (no buzzing noise)
+  // ==========================
+  TCCR4B = (TCCR4B & 0b11111000) | 0x01;
+  TCCR1B = (TCCR1B & 0b11111000) | 0x01;
+  TCCR5B = (TCCR5B & 0b11111000) | 0x01;
+  TCCR2B = (TCCR2B & 0b11111000) | 0x01;
+
   Serial.begin(115200);
   delay(500);
   // ==========================
@@ -321,10 +349,8 @@ void setup() {
   digitalWrite(DEC_LEN, HIGH);
 
 
-  ledcSetup(DEC_PWM_CH_R, PWM_FREQ, PWM_RES);
-  ledcSetup(DEC_PWM_CH_L, PWM_FREQ, PWM_RES);
-  ledcAttachPin(DEC_RPWM, DEC_PWM_CH_R);
-  ledcAttachPin(DEC_LPWM, DEC_PWM_CH_L);
+  pinMode(DEC_RPWM, OUTPUT);
+  pinMode(DEC_LPWM, OUTPUT);
 
   // ==========================
   // Setup RA motor
@@ -341,10 +367,8 @@ void setup() {
   digitalWrite(RA_REN, HIGH);
   digitalWrite(RA_LEN, HIGH);
 
-  ledcSetup(RA_PWM_CH_R, PWM_FREQ, PWM_RES);
-  ledcSetup(RA_PWM_CH_L, PWM_FREQ, PWM_RES);
-  ledcAttachPin(RA_RPWM, RA_PWM_CH_R);
-  ledcAttachPin(RA_LPWM, RA_PWM_CH_L);
+  pinMode(RA_RPWM, OUTPUT);
+  pinMode(RA_LPWM, OUTPUT);
 
   Serial.println("Systeme pret - detection automatique du PWM minimal");
   // Calibrate minimal PWM for both motors (updates DEC_pwm_min_real and RA_pwm_min_real)
@@ -367,7 +391,7 @@ void setup() {
 // ==========================
 void loop() {
   update_motor();
-  delay(20); // small delay to not saturate cpu
+  delay(5); // small delay to not saturate cpu
   if (Serial.available()) {
     String msg = Serial.readStringUntil('\n');
     msg.trim(); // remove on necessairy space and \n
