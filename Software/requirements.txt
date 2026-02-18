@@ -3,3 +3,4 @@ opencv-python
 pandas
 skyfield
 pyserial
+swoasi
