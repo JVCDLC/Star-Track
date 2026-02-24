@@ -192,15 +192,7 @@ def new_ha_dec(ha,dec):
 # MAIN
 # -------------------------------------------------------
 def main():
-
-    
-
-    # a=print_HaDec(celestialBody['JUPITER'],'Jupiter')
-    # print("angle en degree : \n ha : ",a[0], " \n dec : ",a[1])
-    # # print_HaDec(polaris,'Polaris')
-    
-    # print_HaDec(celestialBody['ANDROMEDA'],'M31')
-    # isVisible(celestialBody['ANDROMEDA'])
+  
     updateVisibleCatalog()
     print("\nVisible catalog :")
     for key in visibleCatalog.keys():
@@ -209,7 +201,7 @@ def main():
             print("  -", Body['name'], " (", Body['icon'], ")")
             print(observer.at(currentTime).observe(celestialBody[Body['name']]).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure)[0].degrees)
     print("\nTotal number of visible objects :", sum(len(visibleCatalog[key]) for key in visibleCatalog.keys()))
-#-------------------------------------------------------------------------------------------#
+# #-------------------------------------------------------------------------------------------#
 if __name__ == "__main__":
     main()
 #-------------------------------------------------------------------------------------------#

@@ -26,12 +26,15 @@ load_zwo_sdk()
 
 # Open camera
 camera = asi.Camera(0)
-camera.set_control_value(asi.ASI_GAIN, 0)
-camera.set_control_value(asi.ASI_EXPOSURE, 10000)  # microseconds
+camera.set_control_value(asi.ASI_GAIN, 50)
+camera.set_control_value(asi.ASI_EXPOSURE, 1000000)  # microseconds
 #for planetary imaging
-camera.set_image_type(asi.ASI_IMG_RAW8)
+#camera.set_image_type(asi.ASI_IMG_RAW8)
 #for deep sky imaging
-#camera.set_image_type(asi.ASI_IMG_RAW16)
+camera.set_image_type(asi.ASI_IMG_RAW16) #erreur: vValueError: cannot reshape array of size 2545408 into shape (976,1304),   
+#  frame = np.frombuffer(frame, dtype=np.uint8).reshape(height, width)
+#           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#ValueError: cannot reshape array of size 2545408 into shape (976,1304)
 
 camera.start_video_capture()
 
@@ -49,14 +52,18 @@ writer = cv2.VideoWriter(
 
 while True:
     frame = camera.capture_video_frame()
-    frame = np.frombuffer(frame, dtype=np.uint8).reshape(height, width)
+    frame = np.frombuffer(frame, dtype=np.uint16).reshape(height, width)
 
     cv2.imshow("Live", frame)
     writer.write(frame)
 
-    if cv2.waitKey(1) == 27:  # ESC
+    # if cv2.getWindowProperty("Live", cv2.WND_PROP_VISIBLE) < 100:
+    #     break
+
+    if cv2.waitKey(1) == 27 or cv2.waitKey(1) == ord('q')  : #esc key  q 
         break
 
+   
 writer.release()
 camera.stop_video_capture()
 camera.close()
