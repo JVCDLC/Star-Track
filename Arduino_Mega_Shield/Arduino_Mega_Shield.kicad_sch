@@ -9216,7 +9216,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "0d036bf0-a7b5-46c3-928c-57b4e0783221")
-		(property "Reference" "J10"
+		(property "Reference" "J39"
 			(at 391.16 240.0299 0)
 			(effects
 				(font
@@ -9270,7 +9270,7 @@
 		(instances
 			(project "Arduino_Mega_Shield"
 				(path "/3ddd3141-4e1b-4f2a-8b19-584885bc6717"
-					(reference "J10")
+					(reference "J39")
 					(unit 1)
 				)
 			)
