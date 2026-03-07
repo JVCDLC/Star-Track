@@ -2,6 +2,7 @@
 #include "constants.hpp"
 #include "motors.hpp"
 
+
 int DEC_pwm_min_real = 150;
 volatile long DEC_encoderCount = 0;
 volatile uint8_t DEC_prevState = 0;
@@ -9,6 +10,9 @@ volatile uint8_t DEC_prevState = 0;
 int RA_pwm_min_real = 150;
 volatile long RA_encoderCount = 0;
 volatile uint8_t RA_prevState = 0;
+
+int FOCUS_pwm_min_real = 50;
+
 
 // ==========================
 // Control variable
@@ -25,7 +29,11 @@ double RA_prevErrorDeg = 0.0;
 double RA_integralError = 0.0;
 unsigned long RA_prevTime = 0;
 
-
+double FOCUS_target_degree = 0;
+long FOCUS_target_ticks = 0;
+double FOCUS_prevErrorDeg = 0.0;
+double FOCUS_integralError = 0.0;
+unsigned long FOCUS_prevTime = 0;
 // ==========================
 // Motor driving
 // ==========================
@@ -71,6 +79,22 @@ void RA_drive_motor(int pwm) {
   }
 }
 
+void FOCUS_drive_motor(int pwm) {
+
+  pwm = constrain(pwm, -pwm_max_driver, pwm_max_driver);
+
+  if (pwm > 0) {
+    digitalWrite(FOCUS_DIR, HIGH);
+    analogWrite(FOCUS_PWM, pwm);
+  }
+  else if (pwm < 0) {
+    digitalWrite(FOCUS_DIR, LOW);
+    analogWrite(FOCUS_PWM, -pwm);
+  }
+  else {
+    analogWrite(FOCUS_PWM, 0);
+  }
+}
 
 // ==========================
 // Encoder interrupts
@@ -99,7 +123,6 @@ void ISR_Encoder_RA() {
   RA_prevState = state;
 }
 
-
 // ==========================
 // Encoder reading
 // ==========================
@@ -119,6 +142,17 @@ long RA_encoder_reading() {
   interrupts();
 
   return pos;
+}
+
+long FOCUS_encoder_reading() {
+
+    
+    noInterrupts();
+    long pos = FOCUS_encoderCount;
+    interrupts();
+    Serial.print("FOCUS encoder count: "); Serial.println(pos);
+
+    return pos;
 }
 
 
@@ -206,6 +240,43 @@ int RA_find_minimum_PWM() {
   return pwm_max_driver;
 }
 
+int FOCUS_find_minimum_PWM() {
+
+  int step = 1;
+  int pwm = 50 - step;
+
+  while (pwm <= pwm_max_driver) {
+
+    pwm += step;
+
+    long startPos = FOCUS_encoder_reading();
+    FOCUS_drive_motor(pwm);
+
+    Serial.print("Testing FOCUS PWM: ");
+    Serial.println(pwm);
+
+    delay(200);
+
+    long delta = abs(FOCUS_encoder_reading() - startPos);
+
+    if (delta >= 5) {
+
+      FOCUS_drive_motor(0);
+      delay(200);
+      return pwm;
+    }
+
+    else if (pwm > FOCUS_pwm_start_max) {
+
+      Serial.println("PWM too high, retest...");
+      delay(2000);
+      pwm = pwm_start_test;
+    }
+  }
+
+  FOCUS_drive_motor(0);
+  return pwm_max_driver;
+}
 
 // ==========================
 // Calibration
@@ -246,11 +317,32 @@ void calibrate_minimum_PWM() {
     }
   }
 
+  FOCUS_pwm_min_real = 0;
+
+  for (int i = 0; i < repetitions; i++) {
+
+    int pwm = 0;
+
+    Serial.print("Test ");
+    Serial.print(i + 1);
+    Serial.println(" off PWM minimal...");
+
+    pwm = FOCUS_find_minimum_PWM();
+
+    if (pwm > FOCUS_pwm_min_real) {
+      FOCUS_pwm_min_real = pwm;
+    }
+  }
+
   Serial.print("DEC PWM detecte: ");
   Serial.println(DEC_pwm_min_real);
 
   Serial.print("RA PWM detecte: ");
   Serial.println(RA_pwm_min_real);
+
+  Serial.print("FOCUS PWM detecte: ");
+  Serial.println(FOCUS_pwm_min_real);
+
 
   delay(200);
 }
@@ -309,7 +401,6 @@ void DEC_update_motor() {
   DEC_prevTime = now;
 }
 
-
 // ==========================
 // PID RA
 // ==========================
@@ -364,6 +455,59 @@ void RA_update_motor() {
   RA_prevTime = now;
 }
 
+// ==========================
+// PID FOCUS
+// ==========================
+
+void FOCUS_update_motor() {
+
+  unsigned long now = millis();
+
+  double dt = (now - FOCUS_prevTime) / 1000.0;
+  if (dt <= 0) dt = 0.001;
+
+  long pos = FOCUS_encoder_reading();
+
+  long error_ticks = FOCUS_target_ticks - pos;
+
+  double error_deg = error_ticks * 360.0 / TICKS_PER_REV / FOCUS_gearbox;
+
+  double p_term = FOCUS_Kp * error_deg;
+
+  FOCUS_integralError += error_deg * dt;
+
+  if (FOCUS_integralError > 100) FOCUS_integralError = 100;
+  if (FOCUS_integralError < -100) FOCUS_integralError = -100;
+
+  double i_term = FOCUS_Ki * FOCUS_integralError;
+
+  double d_error = (error_deg - FOCUS_prevErrorDeg) / dt;
+
+  double d_term = FOCUS_Kd * d_error;
+
+  double pwm_f = p_term + i_term + d_term;
+
+  int pwm = (int)pwm_f;
+
+  pwm = constrain(pwm, -pwm_max_driver, pwm_max_driver);
+
+  if (pwm > 0 && pwm < FOCUS_pwm_min_real) {
+    pwm = FOCUS_pwm_min_real;
+    FOCUS_integralError = 0;
+  }
+
+  if (pwm < 0 && pwm > -FOCUS_pwm_min_real) {
+    pwm = -FOCUS_pwm_min_real;
+    FOCUS_integralError = 0;
+  }
+
+  FOCUS_drive_motor(pwm);
+
+  FOCUS_prevErrorDeg = error_deg;
+  FOCUS_prevTime = now;
+  Serial.print("FOCUS error deg: "); Serial.print(error_deg); Serial.print("FOCUS error ticks: "); Serial.println(error_ticks);
+}
+
 
 // ==========================
 // Update both motors
@@ -396,12 +540,20 @@ void set_motor_ra_angle(double deg) {
   RA_integralError = 0.0;
 }
 
+void set_motor_focus_angle(double deg) {
+
+  FOCUS_target_degree = deg;
+
+  FOCUS_target_ticks = FOCUS_target_degree * FOCUS_gearbox * TICKS_PER_REV / 360.0;
+
+  FOCUS_integralError = 0.0;
+}
+
 
 // ==========================
 // Init motors
 // ==========================
 void motors_init() {
-
   pinMode(DEC_ENC_A, INPUT_PULLUP);
   pinMode(DEC_ENC_B, INPUT_PULLUP);
 
@@ -440,4 +592,15 @@ void motors_init() {
 
   pinMode(RA_RPWM, OUTPUT);
   pinMode(RA_LPWM, OUTPUT);
+
+ pinMode(FOCUS_ENC_A, INPUT_PULLUP); // pin 50
+  pinMode(FOCUS_ENC_B, INPUT_PULLUP); // pin 51
+  FOCUS_prevState = (digitalRead(FOCUS_ENC_A) << 1) | digitalRead(FOCUS_ENC_B);
+  last_portB = PINB;                   // initial state of port B for encoder and switches
+  PCICR |= (1 << PCIE0);               // enable PCINT0
+  PCMSK0 |= (1 << PCINT2) | (1 << PCINT3); // enable PB2/PB3
+  FOCUS_encoderCount = 0;
+
+  pinMode(FOCUS_DIR, OUTPUT);
+  pinMode(FOCUS_PWM, OUTPUT);
 }

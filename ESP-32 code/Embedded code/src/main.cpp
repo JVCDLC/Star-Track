@@ -1,6 +1,29 @@
 #include <Arduino.h>
 #include "constants.hpp"
 #include "motors.hpp"
+#include "switchs.hpp"
+volatile uint8_t last_portB = 0;
+volatile uint8_t FOCUS_prevState = 0;
+volatile long FOCUS_encoderCount = 0;
+
+ISR(PCINT0_vect)
+{
+    uint8_t current = PINB;
+    uint8_t changed = current ^ last_portB;
+    last_portB = current;
+
+    // Switchs PB6/PB7
+    if (changed & (1 << 6)) switch9_triggered  = !(current & (1 << 6));
+    if (changed & (1 << 7)) switch10_triggered = !(current & (1 << 7));
+
+    // Encoder FOCUS PB2/PB3 (pins 50/51)
+    uint8_t a = (current & (1 << 2)) >> 2; // pin 50
+    uint8_t b = (current & (1 << 3)) >> 3; // pin 51
+    uint8_t state = (b << 1) | a;          // MSB = b, LSB = a
+    uint8_t index = (FOCUS_prevState << 2) | state;
+    FOCUS_encoderCount += quadTable[index];
+    FOCUS_prevState = state;
+}
 
 // ==========================
 // SETUP
@@ -19,9 +42,9 @@ void setup() {
   delay(500);
 
   Serial.println("Systeme pret - detection automatique du PWM minimal");
-
+  switches_init();
   motors_init();
-  calibrate_minimum_PWM();
+  // calibrate_minimum_PWM();
 
   Serial.print("PWM minimal DEC: "); Serial.println(DEC_pwm_min_real);
   Serial.print("PWM minimal RA: "); Serial.println(RA_pwm_min_real);
@@ -31,14 +54,21 @@ void setup() {
 
   set_motor_dec_angle(0);
   set_motor_ra_angle(0);
+
+  Serial.print("PWM minimal FOCUS: "); Serial.println(FOCUS_find_minimum_PWM());
+  Serial.print("PWM minimal FOCUS: "); Serial.println(FOCUS_find_minimum_PWM());
+  Serial.print("PWM minimal FOCUS: "); Serial.println(FOCUS_find_minimum_PWM());
 }
 
 // ==========================
 // LOOP
 // ==========================
 void loop() {
+  Serial.println("state of switch 1: " + String(switch1_triggered));
 
   update_motor();
+  FOCUS_update_motor(); 
+  set_motor_ra_angle(360);
   delay(5);
 
   if (Serial.available()) {
