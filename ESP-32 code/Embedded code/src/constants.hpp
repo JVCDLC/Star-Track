@@ -1,5 +1,5 @@
-#ifndef MOTOR_CONSTANTS_HPP
-#define MOTOR_CONSTANTS_HPP
+#ifndef CONSTANTS_HPP
+#define CONSTANTS_HPP
 
 ////////////////////////////////////////////////////////////////
 /////////// Global Motor constants
@@ -53,5 +53,24 @@ const double RA_Kp = 25.0;    // Proportional gain
 const double RA_Ki = 0.025;     // Integral gain
 const double RA_Kd = 0.001;   // Derivative gain
 
+////////////////////////////////////////////////////////////////
+/////////// Pin definitions MOTOR FOCUS (FOCUS)(GREEN)
+////////////////////////////////////////////////////////////////
 
-#endif // MOTOR_CONSTANTS_HPP
+// Encoder pins (Green is GND and blue is VCC)
+#define FOCUS_ENC_A 18 //yellow
+#define FOCUS_ENC_B 19 //white
+
+// BTS7960 Motor Driver
+#define FOCUS_DIR 8 //white
+#define FOCUS_PWM 9 //yellow
+
+
+// Motor constants
+const int FOCUS_pwm_start_max = 150; // PWM maximal for the calibration test, if the minimum PWM is higher than this value, the test is redone
+const double FOCUS_gearbox = 34.0;
+
+
+
+
+#endif // MOTORS_CONSTANTS_HPP
