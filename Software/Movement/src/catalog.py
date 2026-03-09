@@ -94,6 +94,13 @@ CATALOG = {
     ]
 }
 
-
-
+def findObjetByNameOrId(name):
+    """Retourne (tab, objet) si trouvé, sinon (None, None)"""
+    for tab_name, objects in CATALOG.items():
+        for obj in objects:
+            if obj["name"].upper() == name.upper() or obj["id"] == name:
             
+                return tab_name, obj
+    return None, None
+
+findObjetByNameOrId("JUPITER")

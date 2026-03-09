@@ -1,15 +1,16 @@
 #-----------------------------------------------------#
 #   Star-Tack project
 #   Movement Module
-#   main.py
+#  
 #   Entry point for movement functionalities
 #   Created by Antoine Desgranges
-#   Last update : 01-25-2026
+#   
 #-----------------------------------------------------#
 
 # Import necessary modules
 
 #from movement_controller import MovementController
+import time
 from skyfield.api import load, Star, wgs84
 from skyfield.data import hipparcos
 from catalog import CATALOG
@@ -52,6 +53,8 @@ pressure = 1005.0 #mbar
 
 celestialBody = {}
 
+
+
 for i in CATALOG["tab-solar"]:
     celestialBody[i['name']] = solarSystem[i['id']]
 
@@ -75,10 +78,7 @@ def updateLocation(lat,lon):
     observer = earth + wgs84.latlon(lat, lon)
     return
 
-def ALTAZtoHADEC(alt, az):
-    # convert Alt/Az coordinates to Hour Angle and Declination
-    Ha , Dec = observer.at(currentTime).from_altaz(alt,az).hadec()
-    return Ha, Dec
+
 
 def isVisible(CB):
     """
@@ -86,6 +86,8 @@ def isVisible(CB):
         Inputs: CB : name of Celestial Body object from skyfield
         Outputs: True if the celestial body is above the horizon, False otherwise
     """
+    global currentTime
+    currentTime = timeScale.now()
     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure)
     altitude = observerInfo[0].degrees
     if altitude > 0: # we consider the object visible if its altitude is greater than 10 degrees to avoid tracking objects too close to the horizon
@@ -137,22 +139,24 @@ def print_HaDec(CB,name=''):
                 name : Name of the celestial body (string)
         Outputs: None
     """
+    global currentTime
+    currentTime = timeScale.now()
     observerInfo = observer.at(currentTime).observe(CB).apparent().hadec() 
     ha = observerInfo[0].degrees
     dec = observerInfo[1].degrees
     print('\nCurrent position of', name)
-    print('  HA :', ha)
+    #print('  HA :', ha)
     if abs(ha) > 90:
         print("Warning: The object HA is greater than 90°.............................")
-    print('  Dec:', dec)
-    print('Distance:', observerInfo[2])
+    #print('  Dec:', dec)
+    #print('Distance:', observerInfo[2])
     
     new_ha, new_dec = new_ha_dec(ha,dec)
 
-    print("  new_ha :", new_ha)
+    print(f" new_ha : {new_ha:.3f} °")
     if abs(new_ha) > 90:
         print("Warning: The object HA is greater than 90°.............................")
-    print('  new_dec:', new_dec)
+    print(f"  new_dec: {new_dec:.3f} °")
     return  new_ha, new_dec 
 
 def print_AltAz(CB,name=''):
@@ -163,6 +167,8 @@ def print_AltAz(CB,name=''):
                 name : Name of the celestial body (string)
         Outputs: None
     """
+    global currentTime
+    currentTime = timeScale.now()
     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure) 
     print('\nCurrent position of', name)
     print('  Altitude :', observerInfo[0])
@@ -191,7 +197,7 @@ def new_ha_dec(ha,dec):
 #-------------------------------------------------------------------------------------------#
 # MAIN
 # -------------------------------------------------------
-def main():
+def print_Visible_Catalog():
   
     updateVisibleCatalog()
     print("\nVisible catalog :")
@@ -203,6 +209,10 @@ def main():
     print("\nTotal number of visible objects :", sum(len(visibleCatalog[key]) for key in visibleCatalog.keys()))
 # #-------------------------------------------------------------------------------------------#
 if __name__ == "__main__":
-    main()
+    print_HaDec(celestialBody['JUPITER'], 'Jupiter')
+    time.sleep(1)
+    currentTime = timeScale.now()
+    print_HaDec(celestialBody['JUPITER'], 'Jupiter')
+    pass
 #-------------------------------------------------------------------------------------------#
 #-------------------------------------------------------------------------------------------#
