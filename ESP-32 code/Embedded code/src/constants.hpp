@@ -78,7 +78,7 @@ const double RA_Kd = 0.001;   // Derivative gain
 const int FOCUS_pwm_start_max = 150; // PWM maximal for the calibration test, if the minimum PWM is higher than this value, the test is redone
 const double FOCUS_gearbox = 75.0;
 const double FOCUS_Kp = 1;    // Proportional gain
-const double FOCUS_Ki = 0.0;   // Integral gain
+const double FOCUS_Ki = 0.5;   // Integral gain
 const double FOCUS_Kd = 0.00;   // Derivative gain
 
 ////////////////////////////////////////////////////////////////
@@ -99,21 +99,21 @@ const double FOCUS_Kd = 0.00;   // Derivative gain
 const int EXTRA_pwm_start_max = 150; // PWM maximal for the calibration test, if the minimum PWM is higher than this value, the test is redone
 const double EXTRA_gearbox = 900.0;
 const double EXTRA_Kp = 25.0;    // Proportional gain
-const double EXTRA_Ki = 0.025;     // Integral gain
+const double EXTRA_Ki = 0.025;   // Integral gain
 const double EXTRA_Kd = 0.001;   // Derivative gain
 
 ////////////////////////////////////////////////////////////////
 /////////// Pin definitions SWITCHES
 ////////////////////////////////////////////////////////////////
-#define SWITCH_1 A8
+#define SWITCH_1 A8 // used as limit switch for focus motor, connected to GND when triggered
 extern volatile bool switch1_triggered;
-#define SWITCH_2 A9
+#define SWITCH_2 A9 // used as limit switch for RA motor in clockwise direction, connected to GND when triggered
 extern volatile bool switch2_triggered;
-#define SWITCH_3 A10
+#define SWITCH_3 A10 // used as limit switch for RA motor in counterclockwise direction, connected to GND when triggered
 extern volatile bool switch3_triggered;
-#define SWITCH_4 A11
+#define SWITCH_4 A11 // used as limit switch for DEC motor in clockwise direction, connected to GND when triggered
 extern volatile bool switch4_triggered;
-#define SWITCH_5 A12
+#define SWITCH_5 A12 // used as limit switch for DEC motor in counterclockwise direction, connected to GND when triggered
 extern volatile bool switch5_triggered;
 #define SWITCH_6 A13
 extern volatile bool switch6_triggered;

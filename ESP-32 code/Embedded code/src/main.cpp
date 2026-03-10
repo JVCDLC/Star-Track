@@ -6,6 +6,8 @@ volatile uint8_t last_portB = 0;
 volatile uint8_t FOCUS_prevState = 0;
 volatile long FOCUS_encoderCount = 0;
 
+
+// interruption for encoder and switchs on port B (pins 50 to 53 for encoder, pins 6 and 7 for switchs)
 ISR(PCINT0_vect)
 {
     uint8_t current = PINB;
@@ -86,10 +88,11 @@ void loop() {
       set_motor_focus_angle(0);
   }
 
+  // update_motor() is called to update the pwm of the motors according to the target 
+  // angle and the encoder reading, it is important to call it as often as possible 
+  // to have a good control of the motors
   update_motor();
-
-  //update_motor();
-  //delay(5);
+  delay(5);
 
   if (Serial.available()) {
 

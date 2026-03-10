@@ -38,11 +38,16 @@ unsigned long FOCUS_prevTime = 0;
 // Motor driving
 // ==========================
 void DEC_drive_motor(int pwm) {
-
+  // Enable the motor driver, it need to be enable to work.
   digitalWrite(DEC_REN, HIGH);
   digitalWrite(DEC_LEN, HIGH);
 
+  // Constrain PWM to the allowed range
   pwm = constrain(pwm, -pwm_max_driver, pwm_max_driver);
+
+  if((!switch4_triggered && pwm > 0)||(!switch5_triggered && pwm < 0)){// STOP if switch 4 or 5 is triggered and the motor is trying to move in the direction that would trigger it
+    pwm = 0;
+  }
 
   if (pwm > 0) {
     analogWrite(DEC_RPWM, pwm);
@@ -59,12 +64,16 @@ void DEC_drive_motor(int pwm) {
 }
 
 void RA_drive_motor(int pwm) {
-
+  // Enable the motor driver, it need to be enable to work.
   digitalWrite(RA_REN, HIGH);
   digitalWrite(RA_LEN, HIGH);
 
+  // Constrain PWM to the allowed range
   pwm = constrain(pwm, -pwm_max_driver, pwm_max_driver);
 
+  if((!switch2_triggered && pwm > 0)||(!switch3_triggered && pwm < 0)){// STOP if switch 2 or 3 is triggered and the motor is trying to move in the direction that would trigger it
+    pwm = 0;
+  }
   if (pwm > 0) {
     analogWrite(RA_RPWM, pwm);
     analogWrite(RA_LPWM, 0);
@@ -82,7 +91,7 @@ void RA_drive_motor(int pwm) {
 void FOCUS_drive_motor(int pwm) {
 
   pwm = -constrain(pwm, -pwm_max_driver, pwm_max_driver);
-  if(switch1_triggered && pwm > 0){// STOP if switch 1 is triggered and the motor is trying to move in the direction that would trigger it
+  if(!switch1_triggered && pwm > 0){// STOP if switch 1 is triggered and the motor is trying to move in the direction that would trigger it
     pwm = 0;
   }
   if (pwm > 0) {
@@ -126,7 +135,7 @@ void ISR_Encoder_RA() {
 }
 
 // ==========================
-// Encoder reading
+// Encoder reading. Theses functions are used to read encoder values without having access problems
 // ==========================
 long DEC_encoder_reading() {
 
@@ -200,7 +209,6 @@ int DEC_find_minimum_PWM() {
   DEC_drive_motor(0);
   return pwm_max_driver;
 }
-
 
 int RA_find_minimum_PWM() {
 
