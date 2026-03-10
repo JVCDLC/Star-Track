@@ -76,8 +76,8 @@ const double RA_Kd = 0.001;   // Derivative gain
 
 // Motor constants
 const int FOCUS_pwm_start_max = 150; // PWM maximal for the calibration test, if the minimum PWM is higher than this value, the test is redone
-const double FOCUS_gearbox = 1.0;
-const double FOCUS_Kp = 0.1;    // Proportional gain
+const double FOCUS_gearbox = 75.0;
+const double FOCUS_Kp = 1;    // Proportional gain
 const double FOCUS_Ki = 0.0;   // Integral gain
 const double FOCUS_Kd = 0.00;   // Derivative gain
 

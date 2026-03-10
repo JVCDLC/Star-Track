@@ -81,8 +81,10 @@ void RA_drive_motor(int pwm) {
 
 void FOCUS_drive_motor(int pwm) {
 
-  pwm = constrain(pwm, -pwm_max_driver, pwm_max_driver);
-
+  pwm = -constrain(pwm, -pwm_max_driver, pwm_max_driver);
+  if(switch1_triggered && pwm > 0){// STOP if switch 1 is triggered and the motor is trying to move in the direction that would trigger it
+    pwm = 0;
+  }
   if (pwm > 0) {
     digitalWrite(FOCUS_DIR, HIGH);
     analogWrite(FOCUS_PWM, pwm);
@@ -255,7 +257,7 @@ int FOCUS_find_minimum_PWM() {
     Serial.print("Testing FOCUS PWM: ");
     Serial.println(pwm);
 
-    delay(200);
+    delay(400);
 
     long delta = abs(FOCUS_encoder_reading() - startPos);
 
@@ -516,6 +518,7 @@ void update_motor() {
 
   DEC_update_motor();
   RA_update_motor();
+  FOCUS_update_motor();
 }
 
 
@@ -525,27 +528,21 @@ void update_motor() {
 void set_motor_dec_angle(double deg) {
 
   DEC_target_degree = deg;
-
-  DEC_target_ticks = DEC_target_degree * DEC_gearbox * TICKS_PER_REV / 360.0;
-
+  DEC_target_ticks = deg * DEC_gearbox * TICKS_PER_REV / 360.0;
   DEC_integralError = 0.0;
 }
 
 void set_motor_ra_angle(double deg) {
 
   RA_target_degree = deg;
-
   RA_target_ticks = RA_target_degree * RA_gearbox * TICKS_PER_REV / 360.0;
-
   RA_integralError = 0.0;
 }
 
 void set_motor_focus_angle(double deg) {
 
   FOCUS_target_degree = deg;
-
   FOCUS_target_ticks = FOCUS_target_degree * FOCUS_gearbox * TICKS_PER_REV / 360.0;
-
   FOCUS_integralError = 0.0;
 }
 

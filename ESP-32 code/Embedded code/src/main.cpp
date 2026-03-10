@@ -51,14 +51,19 @@ void setup() {
 
   DEC_prevTime = millis();
   RA_prevTime = millis();
+  
+  Serial.print("PWM minimal FOCUS: "); Serial.println(FOCUS_find_minimum_PWM());
+  Serial.print("PWM minimal FOCUS: "); Serial.println(FOCUS_find_minimum_PWM());
+  Serial.print("PWM minimal FOCUS: "); Serial.println(FOCUS_find_minimum_PWM());
 
   set_motor_dec_angle(0);
   set_motor_ra_angle(0);
-
-  Serial.print("PWM minimal FOCUS: "); Serial.println(FOCUS_find_minimum_PWM());
-  Serial.print("PWM minimal FOCUS: "); Serial.println(FOCUS_find_minimum_PWM());
-  Serial.print("PWM minimal FOCUS: "); Serial.println(FOCUS_find_minimum_PWM());
+  set_motor_focus_angle(0);
+  delay(500);
 }
+
+  static unsigned long lastChange = 0;
+  static bool at360 = false;
 
 // ==========================
 // LOOP
@@ -66,10 +71,25 @@ void setup() {
 void loop() {
   Serial.println("state of switch 1: " + String(switch1_triggered));
 
+
+  unsigned long now = millis();
+
+  // change target angle of focus every 5 seconds for testing
+  if (now - lastChange >= 6000) {
+
+    lastChange = now;
+    at360 = !at360;
+
+    if (at360)
+      set_motor_focus_angle(3600);
+    else
+      set_motor_focus_angle(0);
+  }
+
   update_motor();
-  FOCUS_update_motor(); 
-  set_motor_ra_angle(360);
-  delay(5);
+
+  //update_motor();
+  //delay(5);
 
   if (Serial.available()) {
 
