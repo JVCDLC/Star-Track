@@ -1,0 +1,1465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StarTrack Bridge</title>
+    <style>
+        :root {
+            --bg: #05080d;
+            --panel: #0b0f19;
+            --panel-soft: rgba(0, 255, 204, 0.05);
+            --line: #004433;
+            --text: #f4fbff;
+            --muted: #89b6ab;
+            --accent: #00ffcc;
+            --warn: #ffd36b;
+            --danger: #ff725c;
+            --shadow: 0 20px 48px rgba(0, 0, 0, 0.34);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            margin: 0;
+            min-height: 100%;
+            background:
+                radial-gradient(circle at top left, rgba(0, 255, 204, 0.08), transparent 24%),
+                radial-gradient(circle at bottom right, rgba(255, 114, 92, 0.08), transparent 24%),
+                linear-gradient(180deg, #04070b 0%, #020409 100%);
+            color: var(--text);
+            font-family: Consolas, "Courier New", monospace;
+        }
+
+        button,
+        input,
+        select {
+            font: inherit;
+        }
+
+        button {
+            cursor: pointer;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .sidebar {
+            padding: 16px;
+            background: rgba(6, 11, 18, 0.94);
+            border-right: 1px solid var(--line);
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            overflow: auto;
+            min-height: 0;
+        }
+
+        .panel {
+            background: var(--panel-soft);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            padding: 14px;
+            box-shadow: var(--shadow);
+        }
+
+        .panel h2,
+        .panel h3 {
+            margin: 0 0 12px;
+            color: var(--accent);
+            font-size: 0.95rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .stack {
+            display: grid;
+            gap: 10px;
+        }
+
+        .row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: center;
+            min-height: 28px;
+        }
+
+        .label {
+            color: var(--muted);
+            font-size: 0.82rem;
+        }
+
+        .value {
+            font-weight: 700;
+            text-align: right;
+            word-break: break-word;
+        }
+
+        .queue-list {
+            display: grid;
+            gap: 10px;
+        }
+
+        .queue-entry {
+            display: grid;
+            gap: 10px;
+            padding: 12px;
+            border-radius: 12px;
+            border: 1px solid var(--line);
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .queue-entry-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            align-items: baseline;
+        }
+
+        .queue-entry-head strong {
+            font-size: 0.92rem;
+        }
+
+        .badge-list,
+        .user-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .user-chip {
+            display: inline-flex;
+            align-items: center;
+            min-height: 30px;
+            padding: 0 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(0, 255, 204, 0.24);
+            background: rgba(0, 255, 204, 0.08);
+            font-size: 0.78rem;
+        }
+
+        .user-chip.commander {
+            border-color: rgba(125, 255, 187, 0.38);
+            background: rgba(125, 255, 187, 0.12);
+        }
+
+        .user-chip.bridge {
+            border-color: rgba(255, 211, 107, 0.34);
+            background: rgba(255, 211, 107, 0.1);
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: 10px;
+        }
+
+        .field {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .field label {
+            color: var(--muted);
+            font-size: 0.76rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .field input,
+        .field select {
+            min-height: 40px;
+            border-radius: 10px;
+            border: 1px solid rgba(0, 255, 204, 0.18);
+            background: rgba(3, 9, 14, 0.95);
+            color: var(--text);
+            padding: 0 10px;
+        }
+
+        .range-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 92px;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 12px;
+        }
+
+        .btn,
+        .btn-danger,
+        .btn-soft {
+            min-height: 40px;
+            border-radius: 10px;
+            border: 1px solid transparent;
+            padding: 0 12px;
+            color: var(--text);
+            background: rgba(0, 255, 204, 0.14);
+        }
+
+        .btn {
+            border-color: rgba(0, 255, 204, 0.26);
+        }
+
+        .btn-soft {
+            background: rgba(255, 255, 255, 0.06);
+            border-color: rgba(255, 255, 255, 0.08);
+        }
+
+        .btn-danger {
+            background: rgba(255, 114, 92, 0.14);
+            border-color: rgba(255, 114, 92, 0.34);
+        }
+
+        .main-view {
+            position: relative;
+            background: #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            min-height: 0;
+        }
+
+        .video-shell {
+            width: min(100%, 1440px);
+            height: min(100vh, 100%);
+            padding: 16px;
+        }
+
+        .video-frame {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            border-radius: 20px;
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            background:
+                linear-gradient(180deg, rgba(8, 14, 23, 0.96), rgba(1, 3, 8, 0.98)),
+                repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.02) 2px, transparent 2px, transparent 24px);
+        }
+
+        .video-frame::after {
+            content: "";
+            position: absolute;
+            inset: 14px;
+            border-radius: 16px;
+            border: 1px solid rgba(0, 255, 204, 0.26);
+            pointer-events: none;
+        }
+
+        #video-feed {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+            background: #000;
+        }
+
+        .video-overlay {
+            position: absolute;
+            top: 22px;
+            right: 22px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .overlay-chip {
+            min-width: 180px;
+            padding: 10px 12px;
+            border-radius: 12px;
+            background: rgba(2, 9, 15, 0.76);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(8px);
+        }
+
+        .overlay-chip .label {
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .log {
+            max-height: 180px;
+            overflow: auto;
+            display: grid;
+            gap: 6px;
+            font-size: 0.76rem;
+        }
+
+        .log-entry {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            padding-bottom: 6px;
+            color: #d9f6ef;
+        }
+
+        .login-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, 0.9);
+        }
+
+        .login-card {
+            width: min(92vw, 360px);
+            border-radius: 18px;
+            border: 1px solid var(--line);
+            background: rgba(6, 11, 18, 0.96);
+            padding: 20px;
+            box-shadow: var(--shadow);
+        }
+
+        .login-card h1 {
+            margin: 0 0 10px;
+            font-size: 1.2rem;
+            letter-spacing: 0.08em;
+        }
+
+        .login-card p {
+            margin: 0 0 14px;
+            color: var(--muted);
+            line-height: 1.5;
+        }
+
+        .toast {
+            position: fixed;
+            top: 18px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 120;
+            padding: 10px 14px;
+            border-radius: 12px;
+            background: rgba(6, 12, 21, 0.96);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            opacity: 0;
+            transition: opacity 0.18s ease;
+            pointer-events: none;
+        }
+
+        .toast.show {
+            opacity: 1;
+        }
+
+        .focus-manual.hidden {
+            display: none;
+        }
+
+        @media (max-width: 1100px) {
+            .layout {
+                grid-template-columns: 1fr;
+                grid-template-rows: minmax(260px, 42vh) minmax(0, 1fr);
+            }
+
+            .sidebar {
+                order: 2;
+                border-right: 0;
+                border-top: 1px solid var(--line);
+            }
+
+            .main-view {
+                order: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="login-overlay" id="login-overlay">
+        <div class="login-card">
+            <h1>BRIDGE ACCESS</h1>
+            <p>Authenticate with the bridge PIN to access realtime monitoring and direct control.</p>
+            <div class="field">
+                <label for="pin-input">PIN</label>
+                <input id="pin-input" type="password" inputmode="numeric" placeholder="1234">
+            </div>
+            <div class="actions">
+                <button class="btn" id="login-btn" type="button">Authenticate</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <div class="layout">
+        <aside class="sidebar">
+            <section class="panel">
+                <h2>System</h2>
+                <div class="stack">
+                    <div class="row"><span class="label">Connection</span><span class="value" id="conn-status">Connecting</span></div>
+                    <div class="row"><span class="label">Commander</span><span class="value" id="commander-text">NONE</span></div>
+                    <div class="row"><span class="label">Joystick User</span><span class="value" id="joystick-user-text">NONE</span></div>
+                    <div class="row"><span class="label">Joystick Vector</span><span class="value" id="joystick-vector-text">0.00 / 0.00</span></div>
+                    <div class="row"><span class="label">Commander Queue</span><span class="value" id="commander-queue-text">0</span></div>
+                    <div class="row"><span class="label">Joystick Queue</span><span class="value" id="joystick-queue-text">0</span></div>
+                </div>
+                <div class="actions">
+                    <button class="btn-danger" id="revoke-joystick-btn" type="button">Revoke Joystick</button>
+                    <button class="btn-danger" id="emergency-stop-btn" type="button">Emergency Stop</button>
+                </div>
+            </section>
+
+            <section class="panel">
+                <h2>Users</h2>
+                <div class="user-list" id="user-list"></div>
+            </section>
+
+            <section class="panel">
+                <h2>Commander Control</h2>
+                <div class="field">
+                    <label for="commander-select">Assign commander</label>
+                    <select id="commander-select"></select>
+                </div>
+                <div class="actions">
+                    <button class="btn" id="set-commander-btn" type="button">Set Commander</button>
+                </div>
+            </section>
+
+            <section class="panel">
+                <h2>Joystick Queue</h2>
+                <div class="stack">
+                    <div class="row"><span class="label">Current Owner</span><span class="value" id="queue-owner-text">NONE</span></div>
+                    <div class="row"><span class="label">Remaining</span><span class="value" id="queue-owner-remaining-text">--</span></div>
+                </div>
+                <div class="actions">
+                    <button class="btn-soft" id="queue-owner-minus-btn" type="button">-30s</button>
+                    <button class="btn-soft" id="queue-owner-plus-btn" type="button">+30s</button>
+                    <button class="btn-danger" id="queue-owner-release-btn" type="button">Release</button>
+                </div>
+                <div class="queue-list" id="queue-list" style="margin-top:12px;">
+                    <div class="queue-entry"><div class="label">No queued observer.</div></div>
+                </div>
+            </section>
+
+            <section class="panel">
+                <h2>Time And GPS</h2>
+                <div class="stack">
+                    <div class="row"><span class="label">Current Time</span><span class="value" id="clock-text">--</span></div>
+                    <div class="row"><span class="label">DateTime</span><span class="value" id="datetime-text">--</span></div>
+                    <div class="row"><span class="label">Latitude</span><span class="value" id="gps-lat-text">0.000000</span></div>
+                    <div class="row"><span class="label">Longitude</span><span class="value" id="gps-lon-text">0.000000</span></div>
+                    <div class="row"><span class="label">Altitude</span><span class="value" id="gps-alt-text">0.00</span></div>
+                </div>
+                <div class="form-grid" style="margin-top:12px;">
+                    <div class="field">
+                        <label for="gps-lat-input">Latitude</label>
+                        <input id="gps-lat-input" inputmode="decimal" placeholder="45.000000">
+                    </div>
+                    <div class="field">
+                        <label for="gps-lon-input">Longitude</label>
+                        <input id="gps-lon-input" inputmode="decimal" placeholder="-73.000000">
+                    </div>
+                    <div class="field">
+                        <label for="gps-alt-input">Altitude</label>
+                        <input id="gps-alt-input" inputmode="decimal" placeholder="0">
+                    </div>
+                </div>
+                <div class="field" style="margin-top:10px;">
+                    <label for="datetime-input">Manual date and time</label>
+                    <input id="datetime-input" type="datetime-local" step="1">
+                </div>
+                <div class="actions">
+                    <button class="btn-soft" id="device-gps-btn" type="button">Use Device GPS</button>
+                    <button class="btn" id="send-gps-btn" type="button">Send GPS</button>
+                    <button class="btn" id="send-now-btn" type="button">Send Current Time</button>
+                    <button class="btn-soft" id="send-manual-time-btn" type="button">Send Manual Time</button>
+                </div>
+            </section>
+
+            <section class="panel">
+                <h2>Mission And Capture</h2>
+                <div class="stack">
+                    <div class="row"><span class="label">Target</span><span class="value" id="mission-target-text">STANDBY</span></div>
+                    <div class="row"><span class="label">Action</span><span class="value" id="mission-action-text">--</span></div>
+                    <div class="row"><span class="label">Last Photo</span><span class="value" id="last-photo-text">--</span></div>
+                    <div class="row"><span class="label">Last Video</span><span class="value" id="last-video-text">--</span></div>
+                </div>
+                <div class="field" style="margin-top:10px;">
+                    <label for="video-duration-input">Video duration (seconds)</label>
+                    <input id="video-duration-input" type="number" min="1" max="3600" value="10">
+                </div>
+                <div class="actions">
+                    <button class="btn" id="photo-btn" type="button">Take Photo</button>
+                    <button class="btn" id="video-btn" type="button">Take Video</button>
+                </div>
+            </section>
+
+            <section class="panel">
+                <h2>Camera And Motor</h2>
+                <div class="field">
+                    <label for="camera-type-select">Camera type</label>
+                    <select id="camera-type-select">
+                        <option value="auto">Auto</option>
+                        <option value="deep_sky">Deep Sky</option>
+                        <option value="planet">Planet</option>
+                    </select>
+                </div>
+                <div class="field" style="margin-top:10px;">
+                    <label for="camera-exposure-range">Exposure</label>
+                    <div class="range-row">
+                        <input id="camera-exposure-range" type="range" min="1" max="1000000" step="1">
+                        <input id="camera-exposure-input" type="number" min="1" max="10000000">
+                    </div>
+                </div>
+                <div class="field" style="margin-top:10px;">
+                    <label for="camera-gain-range">Gain</label>
+                    <div class="range-row">
+                        <input id="camera-gain-range" type="range" min="0" max="600" step="1">
+                        <input id="camera-gain-input" type="number" min="0" max="600">
+                    </div>
+                </div>
+                <div class="row" style="margin-top:12px;"><span class="label">Tracking with camera</span><input id="tracking-toggle" type="checkbox"></div>
+                <div class="row"><span class="label">Compensate earth rotation</span><input id="rotation-toggle" type="checkbox"></div>
+                <div class="actions">
+                    <button class="btn" id="apply-camera-btn" type="button">Apply Camera</button>
+                    <button class="btn-soft" id="apply-motor-btn" type="button">Apply Motor</button>
+                </div>
+            </section>
+
+            <section class="panel">
+                <h2>Focus</h2>
+                <div class="field">
+                    <label for="focus-mode-select">Mode</label>
+                    <select id="focus-mode-select">
+                        <option value="auto">Auto</option>
+                        <option value="manual">Manual</option>
+                    </select>
+                </div>
+                <div class="field focus-manual" id="focus-manual-group" style="margin-top:10px;">
+                    <label for="focus-range">Manual focus</label>
+                    <div class="range-row">
+                        <input id="focus-range" type="range" min="0" max="100" step="1">
+                        <input id="focus-input" type="number" min="0" max="100">
+                    </div>
+                </div>
+                <div class="actions">
+                    <button class="btn" id="apply-focus-btn" type="button">Apply Focus</button>
+                </div>
+            </section>
+
+            <section class="panel">
+                <h2>Transit Log</h2>
+                <div class="log" id="log-output"></div>
+            </section>
+        </aside>
+
+        <main class="main-view">
+            <div class="video-shell">
+                <div class="video-frame">
+                    <img id="video-feed" alt="StarTrack video stream">
+                    <div class="video-overlay">
+                        <div class="overlay-chip">
+                            <span class="label">Mission</span>
+                            <strong id="overlay-mission-text">STANDBY / --</strong>
+                        </div>
+                        <div class="overlay-chip">
+                            <span class="label">Position</span>
+                            <strong id="overlay-gps-text">0.0000 / 0.0000</strong>
+                        </div>
+                        <div class="overlay-chip">
+                            <span class="label">Joystick</span>
+                            <strong id="overlay-joystick-text">NONE</strong>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        const state = {
+            ws: null,
+            authenticated: false,
+            catalog: {},
+            telemetry: {
+                gps: { lat: 0, lon: 0, alt: 0 },
+                joystick: { x: 0, y: 0 },
+                mission: { target: "STANDBY", action: "--" },
+                camera: { exposure: 30000, gain: 150, type: "auto" },
+                motor: { tracking_with_camera: true, compensate_earth_rotation: true },
+                focus: { mode: "auto", manual_value: 50 },
+                capture: { video_duration: 10, last_photo_at: "", last_video_request_at: "", last_video_duration: 10 },
+                datetime: "",
+                timestamp: null
+            },
+            sysInfo: {
+                commander: "NONE",
+                commander_id: null,
+                users: [],
+                commander_queue: [],
+                joystick_queue: [],
+                joystick_user: "NONE",
+                joystick_remaining: null
+            },
+            reconnectTimer: null,
+            toastTimer: null,
+            clockTimer: null,
+            lastTimestampMs: null,
+            lastTimestampPerf: 0,
+            streamTimer: null,
+            streamRetryTimer: null,
+            logLines: [],
+            dirtyFields: new Set(),
+            visibilityHandlerAttached: false,
+            commanderSelectionDirty: false
+        };
+
+        const el = {
+            loginOverlay: document.getElementById("login-overlay"),
+            pinInput: document.getElementById("pin-input"),
+            loginBtn: document.getElementById("login-btn"),
+            connStatus: document.getElementById("conn-status"),
+            commanderText: document.getElementById("commander-text"),
+            joystickUserText: document.getElementById("joystick-user-text"),
+            joystickVectorText: document.getElementById("joystick-vector-text"),
+            commanderQueueText: document.getElementById("commander-queue-text"),
+            joystickQueueText: document.getElementById("joystick-queue-text"),
+            queueOwnerText: document.getElementById("queue-owner-text"),
+            queueOwnerRemainingText: document.getElementById("queue-owner-remaining-text"),
+            queueOwnerMinusBtn: document.getElementById("queue-owner-minus-btn"),
+            queueOwnerPlusBtn: document.getElementById("queue-owner-plus-btn"),
+            queueOwnerReleaseBtn: document.getElementById("queue-owner-release-btn"),
+            queueList: document.getElementById("queue-list"),
+            emergencyStopBtn: document.getElementById("emergency-stop-btn"),
+            commanderSelect: document.getElementById("commander-select"),
+            setCommanderBtn: document.getElementById("set-commander-btn"),
+            userList: document.getElementById("user-list"),
+            clockText: document.getElementById("clock-text"),
+            datetimeText: document.getElementById("datetime-text"),
+            gpsLatText: document.getElementById("gps-lat-text"),
+            gpsLonText: document.getElementById("gps-lon-text"),
+            gpsAltText: document.getElementById("gps-alt-text"),
+            gpsLatInput: document.getElementById("gps-lat-input"),
+            gpsLonInput: document.getElementById("gps-lon-input"),
+            gpsAltInput: document.getElementById("gps-alt-input"),
+            datetimeInput: document.getElementById("datetime-input"),
+            missionTargetText: document.getElementById("mission-target-text"),
+            missionActionText: document.getElementById("mission-action-text"),
+            lastPhotoText: document.getElementById("last-photo-text"),
+            lastVideoText: document.getElementById("last-video-text"),
+            videoDurationInput: document.getElementById("video-duration-input"),
+            cameraTypeSelect: document.getElementById("camera-type-select"),
+            cameraExposureRange: document.getElementById("camera-exposure-range"),
+            cameraExposureInput: document.getElementById("camera-exposure-input"),
+            cameraGainRange: document.getElementById("camera-gain-range"),
+            cameraGainInput: document.getElementById("camera-gain-input"),
+            trackingToggle: document.getElementById("tracking-toggle"),
+            rotationToggle: document.getElementById("rotation-toggle"),
+            focusModeSelect: document.getElementById("focus-mode-select"),
+            focusRange: document.getElementById("focus-range"),
+            focusInput: document.getElementById("focus-input"),
+            focusManualGroup: document.getElementById("focus-manual-group"),
+            revokeJoystickBtn: document.getElementById("revoke-joystick-btn"),
+            deviceGpsBtn: document.getElementById("device-gps-btn"),
+            sendGpsBtn: document.getElementById("send-gps-btn"),
+            sendNowBtn: document.getElementById("send-now-btn"),
+            sendManualTimeBtn: document.getElementById("send-manual-time-btn"),
+            photoBtn: document.getElementById("photo-btn"),
+            videoBtn: document.getElementById("video-btn"),
+            applyCameraBtn: document.getElementById("apply-camera-btn"),
+            applyMotorBtn: document.getElementById("apply-motor-btn"),
+            applyFocusBtn: document.getElementById("apply-focus-btn"),
+            videoFeed: document.getElementById("video-feed"),
+            overlayMissionText: document.getElementById("overlay-mission-text"),
+            overlayGpsText: document.getElementById("overlay-gps-text"),
+            overlayJoystickText: document.getElementById("overlay-joystick-text"),
+            logOutput: document.getElementById("log-output"),
+            toast: document.getElementById("toast")
+        };
+
+        const editableFields = [
+            el.gpsLatInput,
+            el.gpsLonInput,
+            el.gpsAltInput,
+            el.datetimeInput,
+            el.videoDurationInput,
+            el.cameraTypeSelect,
+            el.cameraExposureRange,
+            el.cameraExposureInput,
+            el.cameraGainRange,
+            el.cameraGainInput,
+            el.trackingToggle,
+            el.rotationToggle,
+            el.focusModeSelect,
+            el.focusRange,
+            el.focusInput
+        ].filter(Boolean);
+
+        function markFieldDirty(event) {
+            if (event && event.target && event.target.id) {
+                state.dirtyFields.add(event.target.id);
+            }
+        }
+
+        function markFieldsDirty(...ids) {
+            ids.forEach((id) => {
+                if (id) {
+                    state.dirtyFields.add(id);
+                }
+            });
+        }
+
+        function clearDirtyFields(...ids) {
+            ids.forEach((id) => state.dirtyFields.delete(id));
+        }
+
+        function shouldHydrateField(field) {
+            return (
+                field &&
+                document.activeElement !== field &&
+                !state.dirtyFields.has(field.id)
+            );
+        }
+
+        function syncInputField(field, value) {
+            if (!shouldHydrateField(field)) {
+                return;
+            }
+            field.value = value;
+        }
+
+        function syncSelectField(field, value) {
+            if (!shouldHydrateField(field)) {
+                return;
+            }
+            field.value = value;
+        }
+
+        function syncCheckedField(field, checked) {
+            if (!shouldHydrateField(field)) {
+                return;
+            }
+            field.checked = checked;
+        }
+
+        function updateFocusUi() {
+            const manualMode = el.focusModeSelect.value === "manual";
+            el.focusManualGroup.classList.toggle("hidden", !manualMode);
+            el.focusRange.disabled = !manualMode;
+            el.focusInput.disabled = !manualMode;
+        }
+
+        function normalizeQueueEntries(entries) {
+            if (!Array.isArray(entries)) {
+                return [];
+            }
+            return entries.map((entry, index) => {
+                if (typeof entry === "string") {
+                    return { client_id: null, name: entry, duration: null, index };
+                }
+                return {
+                    client_id: entry.client_id ?? null,
+                    name: entry.name || "Unknown user",
+                    duration: Number.isFinite(Number(entry.duration)) ? Number(entry.duration) : null,
+                    index
+                };
+            });
+        }
+
+        function findTargetById(targetId) {
+            if (!targetId || targetId === "STANDBY") {
+                return null;
+            }
+            for (const targets of Object.values(state.catalog || {})) {
+                const match = (targets || []).find((target) => target.id === targetId);
+                if (match) {
+                    return match;
+                }
+            }
+            return null;
+        }
+
+        function targetLabelForId(targetId) {
+            if (!targetId || targetId === "STANDBY") {
+                return "STANDBY";
+            }
+            return findTargetById(targetId)?.name || targetId;
+        }
+
+        function connectWs() {
+            const ws = new WebSocket(`wss://${location.host}/ws`);
+            state.ws = ws;
+
+            ws.addEventListener("open", () => {
+                el.connStatus.textContent = state.authenticated ? "Bridge connected" : "Socket connected";
+                if (state.reconnectTimer) {
+                    clearTimeout(state.reconnectTimer);
+                    state.reconnectTimer = null;
+                }
+                if (state.authenticated) {
+                    login();
+                }
+            });
+
+            ws.addEventListener("message", (event) => {
+                let packet;
+                try {
+                    packet = JSON.parse(event.data);
+                } catch (_error) {
+                    return;
+                }
+                handlePacket(packet);
+            });
+
+            ws.addEventListener("close", () => {
+                el.connStatus.textContent = "Disconnected";
+                scheduleReconnect();
+            });
+
+            ws.addEventListener("error", () => {
+                el.connStatus.textContent = "Socket error";
+            });
+        }
+
+        function scheduleReconnect() {
+            if (state.reconnectTimer) {
+                return;
+            }
+            state.reconnectTimer = setTimeout(() => {
+                state.reconnectTimer = null;
+                connectWs();
+            }, 1500);
+        }
+
+        function login() {
+            sendPacket({ type: "LOGIN_BRIDGE", pin: el.pinInput.value.trim() });
+        }
+
+        function sendPacket(payload) {
+            if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+                showToast("Connection is not ready.");
+                return false;
+            }
+            state.ws.send(JSON.stringify(payload));
+            return true;
+        }
+
+        function handlePacket(packet) {
+            if (packet.type === "LOGIN_SUCCESS") {
+                state.authenticated = true;
+                el.loginOverlay.style.display = "none";
+                el.connStatus.textContent = "Bridge authenticated";
+                addLog("Bridge authenticated.");
+                if (packet.data) {
+                    applyTelemetry(packet.data);
+                }
+                return;
+            }
+
+            if (packet.type === "LOGIN_FAIL") {
+                showToast("Invalid bridge PIN.");
+                return;
+            }
+
+            if (packet.type === "FULL_STATE") {
+                state.catalog = packet.catalog || state.catalog;
+                applyTelemetry(packet.data || {});
+                return;
+            }
+
+            if (packet.type === "SYS_INFO") {
+                applySysInfo(packet);
+                return;
+            }
+
+            if (packet.type === "TELEMETRY") {
+                applyTelemetry(packet.data || {});
+                return;
+            }
+
+            if (packet.type === "EMERGENCY_STOP") {
+                window.location.href = "/";
+                return;
+            }
+
+            if (packet.type === "TOAST") {
+                showToast(packet.msg || "Update received.");
+            }
+        }
+
+        function applySysInfo(packet) {
+            const previousCommander = state.sysInfo.commander;
+            const previousJoystickUser = state.sysInfo.joystick_user;
+            state.sysInfo = {
+                commander: packet.commander || "NONE",
+                commander_id: packet.commander_id ?? null,
+                users: packet.users || [],
+                commander_queue: packet.commander_queue || [],
+                joystick_queue: packet.joystick_queue || [],
+                joystick_user: packet.joystick_user || "NONE",
+                joystick_remaining: packet.joystick_remaining
+            };
+
+            renderSysInfo();
+
+            if (previousCommander && previousCommander !== state.sysInfo.commander) {
+                addLog(`Commander changed to ${state.sysInfo.commander}.`);
+            }
+            if (previousJoystickUser && previousJoystickUser !== state.sysInfo.joystick_user) {
+                addLog(`Joystick owner is now ${state.sysInfo.joystick_user}.`);
+            }
+        }
+
+        function applyTelemetry(data) {
+            state.telemetry = {
+                ...state.telemetry,
+                ...data,
+                gps: { ...state.telemetry.gps, ...(data.gps || {}) },
+                joystick: { ...state.telemetry.joystick, ...(data.joystick || {}) },
+                mission: { ...state.telemetry.mission, ...(data.mission || {}) },
+                camera: { ...state.telemetry.camera, ...(data.camera || {}) },
+                motor: { ...state.telemetry.motor, ...(data.motor || {}) },
+                focus: { ...state.telemetry.focus, ...(data.focus || {}) },
+                capture: { ...state.telemetry.capture, ...(data.capture || {}) }
+            };
+
+            if (data.timestamp !== undefined && data.timestamp !== null) {
+                state.lastTimestampMs = Number(data.timestamp);
+                state.lastTimestampPerf = performance.now();
+            }
+
+            hydrateControls();
+            renderTelemetry();
+        }
+
+        function hydrateControls() {
+            const gps = state.telemetry.gps;
+            syncInputField(el.gpsLatInput, formatNumber(gps.lat, 6));
+            syncInputField(el.gpsLonInput, formatNumber(gps.lon, 6));
+            syncInputField(el.gpsAltInput, formatNumber(gps.alt, 2));
+            const localValue = isoToLocalInputValue(state.telemetry.datetime);
+            if (localValue) {
+                syncInputField(el.datetimeInput, localValue);
+            }
+
+            const capture = state.telemetry.capture;
+            syncInputField(el.videoDurationInput, capture.video_duration ?? 10);
+
+            const camera = state.telemetry.camera;
+            syncSelectField(el.cameraTypeSelect, camera.type || "auto");
+            syncInputField(
+                el.cameraExposureRange,
+                clampNumber(camera.exposure ?? 30000, 1, 1000000)
+            );
+            syncInputField(el.cameraExposureInput, camera.exposure ?? 30000);
+            syncInputField(el.cameraGainRange, clampNumber(camera.gain ?? 150, 0, 600));
+            syncInputField(el.cameraGainInput, camera.gain ?? 150);
+
+            const motor = state.telemetry.motor;
+            syncCheckedField(el.trackingToggle, motor.tracking_with_camera !== false);
+            syncCheckedField(el.rotationToggle, motor.compensate_earth_rotation !== false);
+
+            const focus = state.telemetry.focus;
+            syncSelectField(el.focusModeSelect, focus.mode || "auto");
+            syncInputField(el.focusRange, clampNumber(focus.manual_value ?? 50, 0, 100));
+            syncInputField(el.focusInput, focus.manual_value ?? 50);
+            updateFocusUi();
+        }
+
+        function renderSysInfo() {
+            const queueEntries = normalizeQueueEntries(state.sysInfo.joystick_queue);
+            el.commanderText.textContent = state.sysInfo.commander || "NONE";
+            const joystickLabel = state.sysInfo.joystick_remaining !== null && state.sysInfo.joystick_user !== "NONE"
+                ? `${state.sysInfo.joystick_user} (${state.sysInfo.joystick_remaining}s)`
+                : state.sysInfo.joystick_user;
+            el.joystickUserText.textContent = joystickLabel;
+            el.commanderQueueText.textContent = String(state.sysInfo.commander_queue.length || 0);
+            el.joystickQueueText.textContent = String(queueEntries.length || 0);
+            el.overlayJoystickText.textContent = joystickLabel;
+            el.queueOwnerText.textContent = state.sysInfo.joystick_user || "NONE";
+            el.queueOwnerRemainingText.textContent =
+                state.sysInfo.joystick_remaining !== null && state.sysInfo.joystick_remaining !== undefined
+                    ? `${state.sysInfo.joystick_remaining}s`
+                    : "--";
+            renderQueueManager(queueEntries);
+            renderCommanderOptions();
+
+            el.userList.innerHTML = "";
+            state.sysInfo.users.forEach((user) => {
+                const chip = document.createElement("span");
+                chip.className = "user-chip";
+                if (user.role === "COMMANDER") {
+                    chip.classList.add("commander");
+                }
+                if (user.role === "BRIDGE") {
+                    chip.classList.add("bridge");
+                }
+                chip.textContent = `${user.name} (${user.role})`;
+                el.userList.appendChild(chip);
+            });
+        }
+
+        function renderTelemetry() {
+            const gps = state.telemetry.gps;
+            const joystick = state.telemetry.joystick;
+            const mission = state.telemetry.mission;
+            const capture = state.telemetry.capture;
+
+            el.clockText.textContent = formatClock();
+            el.datetimeText.textContent = state.telemetry.datetime || "--";
+            el.gpsLatText.textContent = formatNumber(gps.lat, 6);
+            el.gpsLonText.textContent = formatNumber(gps.lon, 6);
+            el.gpsAltText.textContent = formatNumber(gps.alt, 2);
+            el.missionTargetText.textContent = targetLabelForId(mission.target);
+            el.missionActionText.textContent = mission.action || "--";
+            el.lastPhotoText.textContent = capture.last_photo_at || "--";
+            el.lastVideoText.textContent = capture.last_video_request_at || "--";
+            el.joystickVectorText.textContent = `${formatNumber(joystick.x, 2)} / ${formatNumber(joystick.y, 2)}`;
+
+            el.overlayMissionText.textContent = `${targetLabelForId(mission.target)} / ${mission.action || "--"}`;
+            el.overlayGpsText.textContent = `${formatNumber(gps.lat, 4)} / ${formatNumber(gps.lon, 4)}`;
+        }
+
+        function renderQueueManager(queueEntries = normalizeQueueEntries(state.sysInfo.joystick_queue)) {
+            el.queueOwnerMinusBtn.disabled = state.sysInfo.joystick_remaining === null || state.sysInfo.joystick_remaining === undefined;
+            el.queueOwnerPlusBtn.disabled = state.sysInfo.joystick_remaining === null || state.sysInfo.joystick_remaining === undefined;
+            el.queueOwnerReleaseBtn.disabled = (state.sysInfo.joystick_user || "NONE") === "NONE";
+
+            el.queueList.innerHTML = "";
+            if (!queueEntries.length) {
+                const empty = document.createElement("div");
+                empty.className = "queue-entry";
+                empty.innerHTML = '<div class="label">No queued observer.</div>';
+                el.queueList.appendChild(empty);
+                return;
+            }
+
+            queueEntries.forEach((entry, index) => {
+                const card = document.createElement("article");
+                card.className = "queue-entry";
+
+                const head = document.createElement("div");
+                head.className = "queue-entry-head";
+
+                const title = document.createElement("strong");
+                title.textContent = entry.name;
+
+                const meta = document.createElement("span");
+                meta.className = "label";
+                meta.textContent = `Slot ${index + 1}${entry.duration !== null ? ` - ${entry.duration}s` : ""}`;
+
+                head.append(title, meta);
+                card.appendChild(head);
+
+                const actions = document.createElement("div");
+                actions.className = "actions";
+
+                [
+                    { label: "Up", action: "MOVE_UP", className: "btn-soft" },
+                    { label: "Down", action: "MOVE_DOWN", className: "btn-soft" },
+                    { label: "-30s", action: "SUB_30", className: "btn-soft" },
+                    { label: "+30s", action: "ADD_30", className: "btn-soft" },
+                    { label: "Remove", action: "REMOVE", className: "btn-danger" }
+                ].forEach((config) => {
+                    const button = document.createElement("button");
+                    button.type = "button";
+                    button.className = config.className;
+                    button.textContent = config.label;
+                    button.disabled = entry.client_id === null;
+                    button.addEventListener("click", () => {
+                        if (entry.client_id === null) {
+                            return;
+                        }
+                        sendPacket({
+                            type: "JOYSTICK_QUEUE_MANAGE",
+                            action: config.action,
+                            client_id: entry.client_id
+                        });
+                    });
+                    actions.appendChild(button);
+                });
+
+                card.appendChild(actions);
+                el.queueList.appendChild(card);
+            });
+        }
+
+        function renderCommanderOptions() {
+            const users = Array.isArray(state.sysInfo.users) ? state.sysInfo.users : [];
+            const candidates = users.filter((user) => user.role !== "BRIDGE");
+            const currentId = state.sysInfo.commander_id !== null && state.sysInfo.commander_id !== undefined
+                ? String(state.sysInfo.commander_id)
+                : "";
+            const previousSelection = el.commanderSelect.value;
+
+            el.commanderSelect.innerHTML = "";
+
+            if (!candidates.length) {
+                const option = document.createElement("option");
+                option.value = "";
+                option.textContent = "No eligible users";
+                el.commanderSelect.appendChild(option);
+                el.setCommanderBtn.disabled = true;
+                return;
+            }
+
+            candidates.forEach((user) => {
+                const option = document.createElement("option");
+                option.value = String(user.id ?? "");
+                const optionId = String(user.id ?? "");
+                option.textContent = `${user.name}${optionId === currentId ? " (current)" : ""}`;
+                if (optionId === currentId) {
+                    option.selected = true;
+                }
+                el.commanderSelect.appendChild(option);
+            });
+            if (state.commanderSelectionDirty && previousSelection) {
+                const match = candidates.find((user) => String(user.id ?? "") === previousSelection);
+                if (match) {
+                    el.commanderSelect.value = previousSelection;
+                } else {
+                    state.commanderSelectionDirty = false;
+                }
+            }
+            el.setCommanderBtn.disabled = false;
+        }
+
+        function sendGpsFromForm() {
+            const lat = Number.parseFloat(el.gpsLatInput.value);
+            const lon = Number.parseFloat(el.gpsLonInput.value);
+            const alt = Number.parseFloat(el.gpsAltInput.value || "0");
+            if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(alt)) {
+                showToast("Enter valid GPS coordinates.");
+                return;
+            }
+            clearDirtyFields("gps-lat-input", "gps-lon-input", "gps-alt-input");
+            if (sendPacket({ type: "GPS_UPDATE", data: { lat, lon, alt } })) {
+                addLog(`GPS updated to ${lat.toFixed(5)}, ${lon.toFixed(5)}, ${alt.toFixed(1)}.`);
+            }
+        }
+
+        function fillGpsFromDevice() {
+            if (!navigator.geolocation) {
+                showToast("Device GPS is unavailable.");
+                return;
+            }
+            navigator.geolocation.getCurrentPosition(
+                (position) => {
+                    const lat = Number(position.coords.latitude || 0);
+                    const lon = Number(position.coords.longitude || 0);
+                    const alt = Number(position.coords.altitude || 0);
+                    clearDirtyFields("gps-lat-input", "gps-lon-input", "gps-alt-input");
+                    el.gpsLatInput.value = lat.toFixed(6);
+                    el.gpsLonInput.value = lon.toFixed(6);
+                    el.gpsAltInput.value = alt.toFixed(2);
+                    sendGpsFromForm();
+                },
+                () => showToast("Unable to read device GPS."),
+                { enableHighAccuracy: true, timeout: 10000, maximumAge: 10000 }
+            );
+        }
+
+        function sendCurrentTime() {
+            const now = new Date();
+            if (sendPacket({ type: "SYNC_CLOCK", timestamp: now.getTime(), datetime: now.toISOString() })) {
+                addLog(`Time synced to ${now.toISOString()}.`);
+            }
+        }
+
+        function sendManualTime() {
+            const raw = el.datetimeInput.value;
+            if (!raw) {
+                showToast("Choose a manual date and time first.");
+                return;
+            }
+            const manual = new Date(raw);
+            if (Number.isNaN(manual.getTime())) {
+                showToast("Manual date and time is invalid.");
+                return;
+            }
+            clearDirtyFields("datetime-input");
+            if (sendPacket({ type: "SYNC_CLOCK", timestamp: manual.getTime(), datetime: manual.toISOString() })) {
+                addLog(`Manual time synced to ${manual.toISOString()}.`);
+            }
+        }
+
+        function sendCameraSettings() {
+            const exposure = clampNumber(parseInt(el.cameraExposureInput.value, 10), 1, 10000000);
+            const gain = clampNumber(parseInt(el.cameraGainInput.value, 10), 0, 600);
+            const type = el.cameraTypeSelect.value;
+            clearDirtyFields(
+                "camera-type-select",
+                "camera-exposure-range",
+                "camera-exposure-input",
+                "camera-gain-range",
+                "camera-gain-input"
+            );
+            if (sendPacket({ type: "CAMERA_SETTINGS", data: { exposure, gain, type } })) {
+                addLog(`Camera settings updated: ${type}, exposure ${exposure}, gain ${gain}.`);
+            }
+        }
+
+        function sendMotorSettings() {
+            clearDirtyFields("tracking-toggle", "rotation-toggle");
+            if (sendPacket({
+                type: "MOTOR_SETTINGS",
+                data: {
+                    tracking_with_camera: el.trackingToggle.checked,
+                    compensate_earth_rotation: el.rotationToggle.checked
+                }
+            })) {
+                addLog("Motor settings updated.");
+            }
+        }
+
+        function sendFocusSettings() {
+            const manualValue = clampNumber(parseInt(el.focusInput.value, 10), 0, 100);
+            clearDirtyFields("focus-mode-select", "focus-range", "focus-input");
+            if (sendPacket({
+                type: "FOCUS_SETTINGS",
+                data: {
+                    mode: el.focusModeSelect.value,
+                    manual_value: manualValue
+                }
+            })) {
+                addLog(`Focus updated to ${el.focusModeSelect.value}.`);
+            }
+            updateFocusUi();
+        }
+
+        function sendPhotoRequest() {
+            if (sendPacket({ type: "PHOTO_REQUEST" })) {
+                addLog("Photo requested.");
+            }
+        }
+
+        function sendVideoRequest() {
+            const duration = clampNumber(parseInt(el.videoDurationInput.value, 10), 1, 3600);
+            clearDirtyFields("video-duration-input");
+            if (sendPacket({ type: "VIDEO_REQUEST", duration })) {
+                addLog(`Video requested for ${duration} seconds.`);
+            }
+        }
+
+        function revokeJoystick() {
+            if (sendPacket({ type: "REVOKE_JOYSTICK" })) {
+                addLog("Joystick privilege revoked from bridge.");
+            }
+        }
+
+        function sendEmergencyStop() {
+            if (sendPacket({ type: "EMERGENCY_STOP" })) {
+                addLog("Emergency stop sent.");
+            }
+        }
+
+        function setCommander() {
+            const selected = el.commanderSelect.value;
+            if (!selected) {
+                showToast("Select a user to assign commander.");
+                return;
+            }
+            if (sendPacket({ type: "SET_COMMANDER", client_id: selected })) {
+                addLog("Commander reassignment sent.");
+                state.commanderSelectionDirty = false;
+            }
+        }
+
+        function adjustOwnerTime(delta) {
+            if (sendPacket({ type: "JOYSTICK_OWNER_TIME", delta })) {
+                addLog(`Joystick owner time adjusted by ${delta} seconds.`);
+            }
+        }
+
+        function startClockTicker() {
+            if (state.clockTimer) {
+                clearInterval(state.clockTimer);
+            }
+            state.clockTimer = setInterval(() => {
+                el.clockText.textContent = formatClock();
+            }, 1000);
+        }
+
+        function formatClock() {
+            if (Number.isFinite(state.lastTimestampMs)) {
+                const elapsed = performance.now() - state.lastTimestampPerf;
+                return new Date(state.lastTimestampMs + elapsed).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit"
+                });
+            }
+            if (state.telemetry.datetime) {
+                const parsed = new Date(state.telemetry.datetime);
+                if (!Number.isNaN(parsed.getTime())) {
+                    return parsed.toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit"
+                    });
+                }
+            }
+            return "--";
+        }
+
+        function startVideoStream() {
+            if (state.streamTimer) {
+                clearInterval(state.streamTimer);
+            }
+            if (state.streamRetryTimer) {
+                clearTimeout(state.streamRetryTimer);
+            }
+
+            const setSrc = () => {
+                el.videoFeed.src = `/stream?t=${Date.now()}`;
+            };
+
+            const restart = () => {
+                clearTimeout(state.streamRetryTimer);
+                state.streamRetryTimer = setTimeout(() => {
+                    el.videoFeed.removeAttribute("src");
+                    requestAnimationFrame(setSrc);
+                }, 1200);
+            };
+
+            el.videoFeed.onerror = restart;
+            if (!state.visibilityHandlerAttached) {
+                document.addEventListener("visibilitychange", () => {
+                    if (document.visibilityState === "visible" && (!el.videoFeed.currentSrc || el.videoFeed.naturalWidth === 0)) {
+                        restart();
+                    }
+                });
+                state.visibilityHandlerAttached = true;
+            }
+            setSrc();
+            state.streamTimer = setInterval(() => {
+                if (document.visibilityState === "hidden") {
+                    return;
+                }
+                if (!el.videoFeed.currentSrc || (el.videoFeed.complete && el.videoFeed.naturalWidth === 0)) {
+                    restart();
+                }
+            }, 4000);
+        }
+
+        function addLog(message) {
+            const line = `[${new Date().toLocaleTimeString()}] ${message}`;
+            state.logLines.unshift(line);
+            state.logLines = state.logLines.slice(0, 40);
+            el.logOutput.innerHTML = "";
+            state.logLines.forEach((entry) => {
+                const node = document.createElement("div");
+                node.className = "log-entry";
+                node.textContent = entry;
+                el.logOutput.appendChild(node);
+            });
+        }
+
+        function showToast(message) {
+            clearTimeout(state.toastTimer);
+            el.toast.textContent = message;
+            el.toast.classList.add("show");
+            state.toastTimer = setTimeout(() => {
+                el.toast.classList.remove("show");
+            }, 2600);
+        }
+
+        function formatNumber(value, digits) {
+            const number = Number(value);
+            if (!Number.isFinite(number)) {
+                return Number(0).toFixed(Math.max(0, digits));
+            }
+            return number.toFixed(digits);
+        }
+
+        function clampNumber(value, min, max) {
+            if (!Number.isFinite(value)) {
+                return min;
+            }
+            return Math.min(max, Math.max(min, value));
+        }
+
+        function isoToLocalInputValue(isoString) {
+            if (!isoString) {
+                return "";
+            }
+            const parsed = new Date(isoString);
+            if (Number.isNaN(parsed.getTime())) {
+                return "";
+            }
+            const offset = parsed.getTimezoneOffset();
+            const local = new Date(parsed.getTime() - offset * 60000);
+            return local.toISOString().slice(0, 19);
+        }
+
+        function wireEvents() {
+            editableFields.forEach((field) => {
+                field.addEventListener("input", markFieldDirty);
+                field.addEventListener("change", markFieldDirty);
+            });
+
+            el.loginBtn.addEventListener("click", login);
+            el.pinInput.addEventListener("keydown", (event) => {
+                if (event.key === "Enter") {
+                    login();
+                }
+            });
+
+            el.revokeJoystickBtn.addEventListener("click", revokeJoystick);
+            el.queueOwnerMinusBtn.addEventListener("click", () => adjustOwnerTime(-30));
+            el.queueOwnerPlusBtn.addEventListener("click", () => adjustOwnerTime(30));
+            el.queueOwnerReleaseBtn.addEventListener("click", revokeJoystick);
+            el.emergencyStopBtn.addEventListener("click", sendEmergencyStop);
+            el.setCommanderBtn.addEventListener("click", setCommander);
+            el.commanderSelect.addEventListener("change", () => {
+                state.commanderSelectionDirty = true;
+            });
+            el.deviceGpsBtn.addEventListener("click", fillGpsFromDevice);
+            el.sendGpsBtn.addEventListener("click", sendGpsFromForm);
+            el.sendNowBtn.addEventListener("click", sendCurrentTime);
+            el.sendManualTimeBtn.addEventListener("click", sendManualTime);
+            el.photoBtn.addEventListener("click", sendPhotoRequest);
+            el.videoBtn.addEventListener("click", sendVideoRequest);
+            el.applyCameraBtn.addEventListener("click", sendCameraSettings);
+            el.applyMotorBtn.addEventListener("click", sendMotorSettings);
+            el.applyFocusBtn.addEventListener("click", sendFocusSettings);
+            el.focusModeSelect.addEventListener("change", updateFocusUi);
+
+            el.cameraExposureRange.addEventListener("input", () => {
+                markFieldsDirty("camera-exposure-range", "camera-exposure-input");
+                el.cameraExposureInput.value = el.cameraExposureRange.value;
+            });
+            el.cameraExposureInput.addEventListener("input", () => {
+                markFieldsDirty("camera-exposure-range", "camera-exposure-input");
+                el.cameraExposureRange.value = clampNumber(parseInt(el.cameraExposureInput.value, 10), 1, 1000000);
+            });
+            el.cameraGainRange.addEventListener("input", () => {
+                markFieldsDirty("camera-gain-range", "camera-gain-input");
+                el.cameraGainInput.value = el.cameraGainRange.value;
+            });
+            el.cameraGainInput.addEventListener("input", () => {
+                markFieldsDirty("camera-gain-range", "camera-gain-input");
+                el.cameraGainRange.value = clampNumber(parseInt(el.cameraGainInput.value, 10), 0, 600);
+            });
+            el.focusRange.addEventListener("input", () => {
+                markFieldsDirty("focus-range", "focus-input");
+                el.focusInput.value = el.focusRange.value;
+            });
+            el.focusInput.addEventListener("input", () => {
+                markFieldsDirty("focus-range", "focus-input");
+                el.focusRange.value = clampNumber(parseInt(el.focusInput.value, 10), 0, 100);
+            });
+        }
+
+        wireEvents();
+        updateFocusUi();
+        startClockTicker();
+        startVideoStream();
+        connectWs();
+    </script>
+</body>
+</html>
