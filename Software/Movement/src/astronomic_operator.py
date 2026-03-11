@@ -1,10 +1,13 @@
 import numpy as np
 import time
 import catalog; from catalog import CATALOG
-from skyfield.api import load, Star, wgs84
+from skyfield.api import load, Star, wgs84, Topos
 from skyfield.data import hipparcos
-
+from datetime import timedelta
 from enum import Enum
+from skyfield import almanac
+from pytz import timezone
+from timezonefinder import TimezoneFinder
 
 #console input without blocking the main loop
 try:
@@ -43,7 +46,8 @@ visibleCatalog = CATALOG
     #Sherbrooke, QC : 45.365434 , -71.939477
 latitude = 45.365434 #  N 45° 21' 55.563''
 longitude = -71.939477 # W 71° 56' 22.115''
-observer = earth + wgs84.latlon(latitude, longitude)
+observer = earth + wgs84.latlon(latitude, longitude) # topos????
+timeZone = 'America/Toronto'
 temperature = 15.0 #degrees Celsius
 pressure = 1005.0 #mbar
 #-------------------------------------------------------------------------------------------#
@@ -69,6 +73,7 @@ class MOVEMENTSTATE(Enum):
     TRACKING_WITH_CAMERA = 2
     MANUAL_CONTROL = 3
 
+stateOfTelescope = 0 # 0: do nothing, 1: move to new target, 2: tracking with camera, 3: manual control
 compensateEarthrotation: bool = True 
 
 raToMotor = 0 # Right Ascension in degrees
@@ -122,59 +127,67 @@ def updateLocation(lat,lon):
         Outputs: None
     """
     global observer
+    global timeZone
     observer = earth + wgs84.latlon(lat, lon)
+    timeZone = str(timezone_from_position(lat,lon))
     return
 
+def timezone_from_position(lat, lon):
+    tf = TimezoneFinder()
+    tz_name = tf.timezone_at(lat=lat, lng=lon)
+    if tz_name is None:
+        return None
+    return timezone(tz_name)
 
+# def isVisible(CB):
+#     """
+#         Check if a celestial body is visible from the observer location
+#         Inputs: CB : name of Celestial Body object from skyfield
+#         Outputs: True if the celestial body is above the horizon, False otherwise
+#     """
+#     global currentTime
+#     currentTime = timeScale.now()
+#     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure)
+#     altitude = observerInfo[0].degrees
+#     if altitude > 0: # we consider the object visible if its altitude is greater than 0 degrees to avoid tracking objects too close to the horizon
+#         # print("the object is visible, altitude :", altitude)
+#         return True
+#     else:
+#         # print("the object is not visible, altitude :", altitude)
+#         return False
 
-def isVisible(CB):
-    """
-        Check if a celestial body is visible from the observer location
-        Inputs: CB : name of Celestial Body object from skyfield
-        Outputs: True if the celestial body is above the horizon, False otherwise
-    """
-    global currentTime
-    currentTime = timeScale.now()
-    observerInfo = observer.at(currentTime).observe(CB).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure)
-    altitude = observerInfo[0].degrees
-    if altitude > 0: # we consider the object visible if its altitude is greater than 10 degrees to avoid tracking objects too close to the horizon
-        # print("the object is visible, altitude :", altitude)
-        return True
-    else:
-        # print("the object is not visible, altitude :", altitude)
-        return False
-
-def updateVisibleCatalog():
+def update_visible_catalog():
     """
         Update the visible catalog by checking the visibility of each celestial body in the catalog
         Order the catalog by tab and by higher altitude
         Inputs: None
-        Outputs: number of objet in the visibleCatalog
+        Outputs: none
     """
     print('Applying visibility filter to the catalog...')
-    numberOfObjets = 0
+    
     global visibleCatalog
     visibleCatalog = {key: [] for key in CATALOG.keys()} # reset the visible catalog
-    print("test", visibleCatalog)
+    #print("test", visibleCatalog)
     for key in CATALOG.keys():
         for Body in CATALOG[key]:
+            
             try: 
-                if isVisible(celestialBody[Body['name']]):
-                    visibleCatalog[key].append(Body)
-                    numberOfObjets += 1
-                    print_HaDec(celestialBody[Body['name']], Body['name'])
-                    print_AltAz(celestialBody[Body['name']], Body['name'])
+                rising, setting, visible = rising_setting_time(celestialBody[Body['name']])
+                Body['rising'] = rising
+                Body['setting'] = setting
+                rising25,setting25=rising_setting_above_alt(celestialBody[Body['name']],25)
+                Body['rising25'] = rising25
+                Body['setting25'] = setting25
+                rising45,setting45=rising_setting_above_alt(celestialBody[Body['name']],45)
+                Body['rising45'] = rising45
+                Body['setting45'] = setting45
+                visibleCatalog[key].append(Body)
+                #print_HaDec(celestialBody[Body['name']], Body['name'])
+                    
             except KeyError:
                 print("Error: Celestial body", Body['name'], "not found in celestialBody dictionary.")
 
-    # Sort each category by altitude (highest first)
-    for key in visibleCatalog.keys():
-        visibleCatalog[key].sort(
-            key=lambda body: observer.at(currentTime).observe(celestialBody[body['name']]).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure)[0].degrees, 
-            reverse=True
-        )
-
-    return numberOfObjets
+    return visibleCatalog
 
 
 def print_HaDec(CB,name=''):
@@ -194,7 +207,7 @@ def print_HaDec(CB,name=''):
     print('\nCurrent position of', name)
     #print('  HA :', ha)
     if abs(ha) > 90:
-        print("Warning: The object HA is greater than 90°.............................")
+        print("Warning: The object (OLD) HA is greater than 90°")
     #print('  Dec:', dec)
     #print('Distance:', observerInfo[2])
     
@@ -202,27 +215,27 @@ def print_HaDec(CB,name=''):
 
     print(f" new_ha : {new_ha:.3f} °")
     if abs(new_ha) > 90:
-        print("Warning: The object HA is greater than 90°.............................")
+        print("Warning: The object new HA is greater than 90°!!!!!!!!!!!!!!!!!!!!!")
     print(f"  new_dec: {new_dec:.3f} °")
     return  new_ha, new_dec 
 
-def print_AltAz(CB,name=''):
-    """
-        Coordonate printing function for celestial bodies
-        The coordonate are given in Altitude and Azimuth
-        Inputs: CB : Celestial Body object from skyfield
-                name : Name of the celestial body (string)
-        Outputs: None
-    """
-    global currentTime
-    currentTime = timeScale.now()
-    observerInfo = observer.at(currentTime).observe(CB).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure) 
-    print('\nCurrent position of', name)
-    print('  Altitude :', observerInfo[0])
-    print('  Azimuth:', observerInfo[1])
-    print('  Distance:', observerInfo[2])
+# def print_AltAz(CB,name=''):
+#     """
+#         Coordonate printing function for celestial bodies
+#         The coordonate are given in Altitude and Azimuth
+#         Inputs: CB : Celestial Body object from skyfield
+#                 name : Name of the celestial body (string)
+#         Outputs: None
+#     """
+#     global currentTime
+#     currentTime = timeScale.now()
+#     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure) 
+#     print('\nCurrent position of', name)
+#     print('  Altitude :', observerInfo[0])
+#     print('  Azimuth:', observerInfo[1])
+#     print('  Distance:', observerInfo[2])
     
-    return  observerInfo[0].degrees, observerInfo[1].degrees #Alt,Az
+    # return  observerInfo[0].degrees, observerInfo[1].degrees #Alt,Az
 
 def new_ha_dec(ha,dec):
     """
@@ -239,15 +252,91 @@ def new_ha_dec(ha,dec):
         new_dec = (180- dec % 360) % 360 #if new_ha is the opposit -> new_dec need to be mirror
     return new_ha, new_dec
 
-def print_Visible_Catalog():
+
+
+
+
+
+
+def rising_setting_time(CB):
+    """
+    Returns the next rise time (UTC) of a solar system body using Skyfield.
+    Default location: Sherbrooke, QC.
+    """
   
-    updateVisibleCatalog()
+    # 
+
+    # Time window: now → +2 days
+    t0 = timeScale.now()
+    t1 = timeScale.utc(t0.utc_datetime() + timedelta(days=2))
+    localTZ =  timezone(timeZone)
+
+    # Build function for rise/transit/set
+    rising, bool_rise = almanac.find_risings(observer, CB, t0, t1)
+    setting, bool_set = almanac.find_settings(observer, CB,t0, t1)
+    rising  = rising[0].astimezone(localTZ)
+    setting = setting[0].astimezone(localTZ)
+    #print(f"  Rise : {rising}")
+    #print(f"  Set  : {setting}")
+    if rising == None or setting == None:
+        print('erreur de rise or set')
+        return None
+    
+    if rising>setting:
+        #is visible
+        return  rising, setting,True
+
+    return rising, setting,False #is not visible
+
+def above_altitude_predicate( CB, altitude_deg):
+    def predicate(t):
+        alt, az, dist = observer.at(t).observe(CB).apparent().altaz()
+        return alt.degrees > altitude_deg
+    predicate.step_days = 0.01
+    return predicate
+
+
+
+def rising_setting_above_alt( CB, altitude_deg ):
+    t0 = timeScale.now()
+    t1 = timeScale.utc(t0.utc_datetime() + timedelta(days=3))
+
+    predicate = above_altitude_predicate(CB, altitude_deg)
+    times, values = almanac.find_discrete(t0, t1, predicate)
+    #print(values)
+    # We want transitions:
+    #   False → True  = rises above altitude
+    #   True → False  = drops below altitude
+    
+    risingAboveAlt = None
+    settingAboveAlt = None
+    
+    for i in range(1, len(values)):
+        #print('i:',values[i])
+        if not values[i-1] and values[i]:
+            risingAboveAlt = times[i].astimezone(timezone(timeZone))
+            break
+    
+    for j in range(1, len(values)):
+        #print('j:',values[j])
+        if values[j-1] and not values[j]:
+            settingAboveAlt = times[j].astimezone(timezone(timeZone))
+            break
+
+    return risingAboveAlt, settingAboveAlt
+
+def print_visible_catalog():
+  
+    update_visible_catalog()
     print("\nVisible catalog :")
     for key in visibleCatalog.keys():
         print("\n", key, ":")
         for Body in visibleCatalog[key]:
+            
             print("  -", Body['name'], " (", Body['icon'], ")")
-            print(observer.at(currentTime).observe(celestialBody[Body['name']]).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure)[0].degrees)
+            print(f'rise :{Body['rising']}, 25:{Body['rising25']}, 45:{Body['rising45']}')
+            print(f'rise :{Body['setting']}, 25:{Body['setting25']}, 45:{Body['setting45']}')
+            print('alt:', observer.at(currentTime).observe(celestialBody[Body['name']]).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure)[0].degrees)
     print("\nTotal number of visible objects :", sum(len(visibleCatalog[key]) for key in visibleCatalog.keys()))
 
 #--------------------------------TELESCOPE CONTROLE FUNCTION--------------------------------------------------#
@@ -349,7 +438,12 @@ def moveManually(inputX, inputY):
     [ha,dec] = rotateXYtoHADEC(moveX, moveY)
     return ha, dec
 
-def moveToTarget(stateOfTelescope = 0):
+def moveToTarget():
+    """
+        Move the telescope to the target celestial body based on the current state of the telescope
+        Inputs: stateOfTelescope : current state of the telescope (0: do nothing, 1: move to new target, 2: tracking with camera, 3: manual control)
+        Outputs: raToMotor, decToMotor : updated RA and Dec for the motors in degrees
+    """
     # code for moving the camera each 2 sec
     # case 1 : go to new taget
     # case 2 : camera recentering
@@ -357,6 +451,7 @@ def moveToTarget(stateOfTelescope = 0):
     # case 0 : do nothing
     now = time.monotonic()
     global raToMotor, decToMotor
+    global stateOfTelescope 
     targetCelestialBody = None #---francis---# replace with actual target celestial body
     match stateOfTelescope:
         case MOVEMENTSTATE.MISSION_TO_TARGET:
@@ -421,7 +516,9 @@ def moveToTarget(stateOfTelescope = 0):
     print(f"Moving to RA: {raToMotor:.4f}°, Dec: {decToMotor:.4f}°")
     return raToMotor, decToMotor
 
-def main():
+#--------------------------     SETUP       --------------------------------------#
+
+def setup():
     
     #setup
     print('setup...')
@@ -434,7 +531,10 @@ def main():
 
     
     i=0######
-    
+
+#--------------------------     LOOP       --------------------------------------#
+
+def operator_loop():
     while True:
         # example operation prior to waiting, could call moveToTarget()
         
@@ -443,8 +543,10 @@ def main():
         if now >= next_updates['variable_update']:
             next_updates['variable_update'] += INTERVALS['variable_update']
 
-            #----------------------------UPDATE camera VARIABLES----------------------------#
+            #----------------------------UPDATE PARAMETERS----------------------------#
+            #look if old parameters have changed and update the state of the telescope accordingly
 
+            
             #----------------------------UPDATE movement VARIABLES----------------------------#
             """
             if joystick_input_available: #---francis---# replace with actual check for joystick input availability
@@ -462,7 +564,7 @@ def main():
             """
             #----------------------------UPDATE MOVEMENT-----------------------------#
             #calculate ra and dec
-            moveToTarget(stateOfTelescope)
+            moveToTarget()
 
             #verify ra and dec
             if abs(raToMotor) > 100 or abs(decToMotor) > 160:
@@ -485,10 +587,10 @@ def main():
                 lastDecToMotor = decToMotor
                 #send decToMotor to JP for motor control
                 pass
-            """
-               hello jp
-            """
             
+            """
+                movement of the focus missing ...
+            """
             #------------------------------EXIT CONDITION------------------------------#
             #escape key to exit the loop
             key = None
@@ -514,7 +616,7 @@ def main():
             jupi = solarSystem['jupiter barycenter']
             print_HaDec(jupi, 'Jupiter')
 
-    time.sleep(0.001)  # not overload CPU with a tight loop
+    time.sleep(0.0001)  # not overload CPU with a tight loop
     pass
     
 
@@ -522,7 +624,13 @@ def main():
 # MAIN
 # -------------------------------------------------------
 if __name__ == "__main__":
-    main()
+    # setup()
+    # operator_loop()
+    rise,sett =rising_setting_above_alt(celestialBody['JUPITER'],50)
+    print(rise)
+    print(sett)
+    rising_setting_time(celestialBody['JUPITER'])
+    print_visible_catalog()
     pass
 
         
