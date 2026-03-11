@@ -250,7 +250,6 @@ def print_Visible_Catalog():
             print(observer.at(currentTime).observe(celestialBody[Body['name']]).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure)[0].degrees)
     print("\nTotal number of visible objects :", sum(len(visibleCatalog[key]) for key in visibleCatalog.keys()))
 
-
 #--------------------------------TELESCOPE CONTROLE FUNCTION--------------------------------------------------#
 def rotateXYtoHADEC(X,Y):
     """
