@@ -46,6 +46,9 @@ void setup() {
   Serial.println("Systeme pret - detection automatique du PWM minimal");
   switches_init();
   motors_init();
+
+  RA_find_angle_range();
+
   calibrate_minimum_PWM();
 
   Serial.print("PWM minimal DEC: "); Serial.println(DEC_pwm_min_real);

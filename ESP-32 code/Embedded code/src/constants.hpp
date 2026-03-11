@@ -29,7 +29,7 @@ const int8_t quadTable[16] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
 #define DEC_LEN  23 //orange
 
 // Motor constants
-const int DEC_pwm_start_max = 150; // PWM maximal for the calibration test, if the minimum PWM is higher than this value, the test is redone
+const int DEC_pwm_start_max = 120; // PWM maximal for the calibration test, if the minimum PWM is higher than this value, the test is redone
 const double DEC_gearbox = 900.0;
 const double DEC_Kp = 25.0;   // Proportional gain
 const double DEC_Ki = 0.025;     // Integral gain
@@ -50,7 +50,7 @@ const double DEC_Kd = 0.001;   // Derivative gain
 #define RA_LEN  25 //orange
 
 // Motor constants
-const int RA_pwm_start_max = 150; // PWM maximal for the calibration test, if the minimum PWM is higher than this value, the test is redone
+const int RA_pwm_start_max = 120; // PWM maximal for the calibration test, if the minimum PWM is higher than this value, the test is redone
 const double RA_gearbox = 900.0;
 const double RA_Kp = 25.0;    // Proportional gain
 const double RA_Ki = 0.025;     // Integral gain
@@ -75,7 +75,7 @@ const double RA_Kd = 0.001;   // Derivative gain
 #define FOCUS_PWM 11 //yellow
 
 // Motor constants
-const int FOCUS_pwm_start_max = 150; // PWM maximal for the calibration test, if the minimum PWM is higher than this value, the test is redone
+const int FOCUS_pwm_start_max = 120; // PWM maximal for the calibration test, if the minimum PWM is higher than this value, the test is redone
 const double FOCUS_gearbox = 75.0;
 const double FOCUS_Kp = 1;    // Proportional gain
 const double FOCUS_Ki = 0.5;   // Integral gain
