@@ -106,15 +106,15 @@ const double EXTRA_Kd = 0.001;   // Derivative gain
 /////////// Pin definitions SWITCHES
 ////////////////////////////////////////////////////////////////
 #define SWITCH_1 A8 // used as limit switch for focus motor, connected to GND when triggered
-extern volatile bool switch1_triggered;
+extern volatile bool switch1_triggered; // Purple
 #define SWITCH_2 A9 // used as limit switch for RA motor in clockwise direction, connected to GND when triggered
-extern volatile bool switch2_triggered;
+extern volatile bool switch2_triggered; // Blue
 #define SWITCH_3 A10 // used as limit switch for RA motor in counterclockwise direction, connected to GND when triggered
-extern volatile bool switch3_triggered;
+extern volatile bool switch3_triggered; // Orange
 #define SWITCH_4 A11 // used as limit switch for DEC motor in clockwise direction, connected to GND when triggered
-extern volatile bool switch4_triggered;
+extern volatile bool switch4_triggered; // Green
 #define SWITCH_5 A12 // used as limit switch for DEC motor in counterclockwise direction, connected to GND when triggered
-extern volatile bool switch5_triggered;
+extern volatile bool switch5_triggered; // Yellow
 #define SWITCH_6 A13
 extern volatile bool switch6_triggered;
 #define SWITCH_7 A14

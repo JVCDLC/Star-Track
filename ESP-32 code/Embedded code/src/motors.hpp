@@ -4,9 +4,11 @@
 
 extern int DEC_pwm_min_real;
 extern int RA_pwm_min_real;
+extern int FOCUS_pwm_min_real;
 
 extern unsigned long DEC_prevTime;
 extern unsigned long RA_prevTime;
+extern unsigned long FOCUS_prevTime;
 
 void motors_init();
 

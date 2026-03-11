@@ -2,7 +2,6 @@
 #include "constants.hpp"
 #include "motors.hpp"
 
-
 int DEC_pwm_min_real = 150;
 volatile long DEC_encoderCount = 0;
 volatile uint8_t DEC_prevState = 0;
@@ -225,7 +224,7 @@ int RA_find_minimum_PWM() {
     Serial.print("Testing RA PWM: ");
     Serial.println(pwm);
 
-    delay(300);
+    delay(200);
 
     long delta = abs(RA_encoder_reading() - startPos);
 
@@ -265,7 +264,7 @@ int FOCUS_find_minimum_PWM() {
     Serial.print("Testing FOCUS PWM: ");
     Serial.println(pwm);
 
-    delay(400);
+    delay(200);
 
     long delta = abs(FOCUS_encoder_reading() - startPos);
 
@@ -309,6 +308,7 @@ void calibrate_minimum_PWM() {
       DEC_pwm_min_real = DEC_pwm;
     }
   }
+  
 
   RA_pwm_min_real = 0;
 
