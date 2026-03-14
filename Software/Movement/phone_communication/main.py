@@ -11,7 +11,7 @@ from datetime import datetime
 import cv2
 import numpy as np
 from aiohttp import WSMsgType, web
-
+import zmq
 try:
     import zwoasi as asi
 except ImportError:
@@ -504,6 +504,9 @@ class CameraManager:
         self.lock = threading.Lock()
         self.settings_lock = threading.Lock()
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
+        context = zmq.Context()
+        self.zmq_socket = context.socket(zmq.PUB)
+        self.zmq_socket.bind("ipc:///tmp/video_feed")
 
     def start(self):
         self.thread.start()
@@ -578,6 +581,7 @@ class CameraManager:
                     if ok:
                         frame = cv2.resize(raw, (VIDEO_WIDTH, VIDEO_HEIGHT))
                 if frame is None:
+                    self.zmq_socket.send(frame.tobytes())
                     frame = np.zeros((VIDEO_HEIGHT, VIDEO_WIDTH, 3), dtype=np.uint8)
                     cv2.putText(
                         frame,

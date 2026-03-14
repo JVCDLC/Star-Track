@@ -1,0 +1,25 @@
+# Strucuture of a message from Raspberry Pi to Arduino
+Action[,Motor,(Angle step/Speed step/sec)]
+
+Action (int):
+- 0 : Stop
+- 1 : Angle Mouvement
+- 2 : Speed Mouvement (only available for FOC)
+
+Motor (string):
+- FOC : Focus motor
+- DEC : Declination motor
+- RA : Right ascension motor
+
+Angle (long): Angle in steps
+- FOC : 
+- DEC : -21 375, 21 375
+- RA : -293 155, 293 155 steps
+
+Speed (float): Speed in step per second
+- 
+Examples of message:
+- 0
+- 1,DEC,50.001
+- 2,FOC,10.05
+
