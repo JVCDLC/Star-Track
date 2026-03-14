@@ -1,12 +1,22 @@
 #ifndef MOTORS_HPP
 #define MOTORS_HPP
 #include <Arduino.h>
+#include "constants.hpp"
 
 extern int DEC_pwm_min_real;
 extern int RA_pwm_min_real;
+extern int FOCUS_pwm_min_real;
 
 extern unsigned long DEC_prevTime;
 extern unsigned long RA_prevTime;
+extern unsigned long FOCUS_prevTime;
+
+extern long DEC_min_angle;
+extern long DEC_max_angle;
+extern long RA_min_angle;
+extern long RA_max_angle;
+extern long FOCUS_min_angle;
+extern long FOCUS_max_angle;
 
 void motors_init();
 
@@ -24,6 +34,12 @@ void calibrate_minimum_PWM();
 int DEC_find_minimum_PWM();
 int RA_find_minimum_PWM();
 int FOCUS_find_minimum_PWM();
+
+void find_angle_range();
+
+void RA_find_angle_range();
+void DEC_find_angle_range();
+void FOCUS_find_angle_range();
 
 void DEC_update_motor();
 void RA_update_motor();

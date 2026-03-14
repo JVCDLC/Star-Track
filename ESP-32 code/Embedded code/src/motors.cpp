@@ -2,7 +2,6 @@
 #include "constants.hpp"
 #include "motors.hpp"
 
-
 int DEC_pwm_min_real = 150;
 volatile long DEC_encoderCount = 0;
 volatile uint8_t DEC_prevState = 0;
@@ -34,6 +33,13 @@ long FOCUS_target_ticks = 0;
 double FOCUS_prevErrorDeg = 0.0;
 double FOCUS_integralError = 0.0;
 unsigned long FOCUS_prevTime = 0;
+
+long DEC_min_angle = 0;
+long DEC_max_angle = 0;
+long RA_min_angle = 0;
+long RA_max_angle = 0;
+long FOCUS_min_angle = 0;
+long FOCUS_max_angle = 0;
 // ==========================
 // Motor driving
 // ==========================
@@ -166,6 +172,62 @@ long FOCUS_encoder_reading() {
     return pos;
 }
 
+// ==========================
+// Find angle range for the motors using limit switchs
+// ==========================
+void DEC_find_angle_range(){}
+
+void RA_find_angle_range(){
+  // move in one direction until switch is triggered
+  while (switch2_triggered) {
+    RA_drive_motor(pwm_max_driver);
+    delay(10);
+  }
+  RA_drive_motor(0);
+  RA_min_angle = RA_encoder_reading();
+  // move a bit to do a second passage
+  RA_drive_motor(pwm_max_driver);
+  delay(1000);
+  // second passage to be sure the initial value  is correct
+  while (switch2_triggered) {
+    RA_drive_motor(RA_pwm_start_max);
+    delay(10);
+  }
+  RA_drive_motor(0);
+  RA_min_angle = RA_encoder_reading();
+
+
+
+  while (switch3_triggered) {
+    RA_drive_motor(RA_pwm_start_max);
+    delay(10);
+  }
+  // move a bit to do a second passage
+  RA_drive_motor(-RA_pwm_start_max);
+  delay(1000);
+  // second passage to be sure the initial value  is correct
+  while (switch3_triggered) {
+    RA_drive_motor(-RA_pwm_start_max);
+    delay(10);
+  }
+  RA_drive_motor(0);
+  RA_min_angle = RA_encoder_reading();
+
+  // move in the other direction until switch is triggered
+  while (switch3_triggered) {
+    RA_drive_motor(-pwm_max_driver);
+    delay(10);
+  }
+  RA_drive_motor(0);
+  RA_max_angle = RA_encoder_reading();
+
+  Serial.print("RA angle range in ticks: ");
+  Serial.print(RA_min_angle);
+  Serial.print(" to ");
+  Serial.println(RA_max_angle);
+}
+
+void FOCUS_find_angle_range(){}
 
 // ==========================
 // Find minimum PWM
@@ -225,7 +287,7 @@ int RA_find_minimum_PWM() {
     Serial.print("Testing RA PWM: ");
     Serial.println(pwm);
 
-    delay(300);
+    delay(200);
 
     long delta = abs(RA_encoder_reading() - startPos);
 
@@ -265,7 +327,7 @@ int FOCUS_find_minimum_PWM() {
     Serial.print("Testing FOCUS PWM: ");
     Serial.println(pwm);
 
-    delay(400);
+    delay(200);
 
     long delta = abs(FOCUS_encoder_reading() - startPos);
 
@@ -292,9 +354,8 @@ int FOCUS_find_minimum_PWM() {
 // Calibration
 // ==========================
 void calibrate_minimum_PWM() {
-
   DEC_pwm_min_real = 0;
-
+/*
   for (int i = 0; i < repetitions; i++) {
 
     int DEC_pwm = 0;
@@ -309,6 +370,7 @@ void calibrate_minimum_PWM() {
       DEC_pwm_min_real = DEC_pwm;
     }
   }
+  */
 
   RA_pwm_min_real = 0;
 
@@ -357,7 +419,11 @@ void calibrate_minimum_PWM() {
   delay(200);
 }
 
-
+void find_angle_range() {
+  RA_find_angle_range();
+  //DEC_find_angle_range();
+  //FOCUS_find_angle_range();
+}
 // ==========================
 // PID DEC
 // ==========================

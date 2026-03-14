@@ -46,18 +46,18 @@ void setup() {
   Serial.println("Systeme pret - detection automatique du PWM minimal");
   switches_init();
   motors_init();
-  // calibrate_minimum_PWM();
+
+  RA_find_angle_range();
+
+  calibrate_minimum_PWM();
 
   Serial.print("PWM minimal DEC: "); Serial.println(DEC_pwm_min_real);
   Serial.print("PWM minimal RA: "); Serial.println(RA_pwm_min_real);
+  Serial.print("PWM minimal FOCUS: "); Serial.println(FOCUS_pwm_min_real);
 
   DEC_prevTime = millis();
   RA_prevTime = millis();
-  
-  Serial.print("PWM minimal FOCUS: "); Serial.println(FOCUS_find_minimum_PWM());
-  Serial.print("PWM minimal FOCUS: "); Serial.println(FOCUS_find_minimum_PWM());
-  Serial.print("PWM minimal FOCUS: "); Serial.println(FOCUS_find_minimum_PWM());
-
+  FOCUS_prevTime = millis();
   set_motor_dec_angle(0);
   set_motor_ra_angle(0);
   set_motor_focus_angle(0);
@@ -82,10 +82,16 @@ void loop() {
     lastChange = now;
     at360 = !at360;
 
-    if (at360)
-      set_motor_focus_angle(3600);
-    else
-      set_motor_focus_angle(0);
+    if (at360){
+      //set_motor_focus_angle(3600);
+      set_motor_ra_angle(360);
+      set_motor_dec_angle(360);
+    }
+    else{
+      //set_motor_focus_angle(0);
+      set_motor_ra_angle(0);
+      set_motor_dec_angle(0);
+    }
   }
 
   // update_motor() is called to update the pwm of the motors according to the target 
