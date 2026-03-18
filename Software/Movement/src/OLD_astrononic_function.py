@@ -51,8 +51,7 @@ visibleCatalog = CATALOG
 latitude = 45.365434 #  N 45° 21' 55.563''
 longitude = -71.939477 # W 71° 56' 22.115''
 observer = earth + Topos(latitude_degrees=latitude, longitude_degrees=longitude)
-temperature = 15.0 #degrees Celsius
-pressure = 1005.0 #mbar
+
 timeZone = 'America/Toronto'
 #-------------------------------------------------------------------------------------------#
 
@@ -100,7 +99,7 @@ def timezone_from_position(lat, lon):
 #     """
 #     global currentTime
 #     currentTime = timeScale.now()
-#     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure)
+#     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz()
 #     altitude = observerInfo[0].degrees
 #     if altitude > 0: # we consider the object visible if its altitude is greater than 0 degrees to avoid tracking objects too close to the horizon
 #         # print("the object is visible, altitude :", altitude)
@@ -182,7 +181,7 @@ def print_HaDec(CB,name=''):
 #     """
 #     global currentTime
 #     currentTime = timeScale.now()
-#     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure) 
+#     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz() 
 #     print('\nCurrent position of', name)
 #     print('  Altitude :', observerInfo[0])
 #     print('  Azimuth:', observerInfo[1])
@@ -289,18 +288,19 @@ def print_visible_catalog():
             print("  -", Body['name'], " (", Body['icon'], ")")
             print(f'rise :{Body['rising']}, 25:{Body['rising25']}, 45:{Body['rising45']}')
             print(f'rise :{Body['setting']}, 25:{Body['setting25']}, 45:{Body['setting45']}')
-            print('alt:', observer.at(currentTime).observe(celestialBody[Body['name']]).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure)[0].degrees)
+            print('alt:', observer.at(currentTime).observe(celestialBody[Body['name']]).apparent().altaz()[1])
     print("\nTotal number of visible objects :", sum(len(visibleCatalog[key]) for key in visibleCatalog.keys()))
 # #-------------------------------------------------------------------------------------------#
 #-------------------------------------------------------------------------------------------#
 # MAIN
 # -------------------------------------------------------
 if __name__ == "__main__":
-    rise,sett =rising_setting_above_alt(celestialBody['JUPITER'],50)
-    print(rise)
-    print(sett)
-    rising_setting_time(celestialBody['JUPITER'])
-    print_visible_catalog()
+    # rise,sett =rising_setting_above_alt(celestialBody['JUPITER'],50)
+    # print(rise)
+    # print(sett)
+    # rising_setting_time(celestialBody['JUPITER'])
+    # print_visible_catalog()
+    print(timeScale.now().astimezone(timezone(timeZone)))
     pass
 #-------------------------------------------------------------------------------------------#
 #-------------------------------------------------------------------------------------------#

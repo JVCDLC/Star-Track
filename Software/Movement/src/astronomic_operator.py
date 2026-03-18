@@ -48,8 +48,7 @@ latitude = 45.365434 #  N 45° 21' 55.563''
 longitude = -71.939477 # W 71° 56' 22.115''
 observer = earth + wgs84.latlon(latitude, longitude) # topos????
 timeZone = 'America/Toronto'
-temperature = 15.0 #degrees Celsius
-pressure = 1005.0 #mbar
+
 #-------------------------------------------------------------------------------------------#
 
 celestialBody = {}
@@ -78,8 +77,7 @@ compensateEarthrotation: bool = True
 
 raToMotor = 0 # Right Ascension in degrees
 decToMotor = 0 # Declination in degrees
-lastRaToMotor = 0
-lastDecToMotor = 0
+focusToMotor = 0
 
 #Variables for movement
 INTERVALS = {
@@ -147,7 +145,7 @@ def timezone_from_position(lat, lon):
 #     """
 #     global currentTime
 #     currentTime = timeScale.now()
-#     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure)
+#     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz()
 #     altitude = observerInfo[0].degrees
 #     if altitude > 0: # we consider the object visible if its altitude is greater than 0 degrees to avoid tracking objects too close to the horizon
 #         # print("the object is visible, altitude :", altitude)
@@ -229,7 +227,7 @@ def print_HaDec(CB,name=''):
 #     """
 #     global currentTime
 #     currentTime = timeScale.now()
-#     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure) 
+#     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz() 
 #     print('\nCurrent position of', name)
 #     print('  Altitude :', observerInfo[0])
 #     print('  Azimuth:', observerInfo[1])
@@ -251,12 +249,6 @@ def new_ha_dec(ha,dec):
     if abs(ha) >= 90:
         new_dec = (180- dec % 360) % 360 #if new_ha is the opposit -> new_dec need to be mirror
     return new_ha, new_dec
-
-
-
-
-
-
 
 def rising_setting_time(CB):
     """
@@ -336,7 +328,7 @@ def print_visible_catalog():
             print("  -", Body['name'], " (", Body['icon'], ")")
             print(f'rise :{Body['rising']}, 25:{Body['rising25']}, 45:{Body['rising45']}')
             print(f'rise :{Body['setting']}, 25:{Body['setting25']}, 45:{Body['setting45']}')
-            print('alt:', observer.at(currentTime).observe(celestialBody[Body['name']]).apparent().altaz(temperature_C=temperature, pressure_mbar=pressure)[0].degrees)
+            print('alt:', observer.at(currentTime).observe(celestialBody[Body['name']]).apparent().altaz()[1])
     print("\nTotal number of visible objects :", sum(len(visibleCatalog[key]) for key in visibleCatalog.keys()))
 
 #--------------------------------TELESCOPE CONTROLE FUNCTION--------------------------------------------------#
@@ -548,20 +540,28 @@ def operator_loop():
 
             
             #----------------------------UPDATE movement VARIABLES----------------------------#
-            """
-            if joystick_input_available: #---francis---# replace with actual check for joystick input availability
-                inputX = 0 #---francis---# replace with actual input
-                inputY = 0 #---francis---# replace with actual input
-                if abs(inputX) > 0.1 and abs(inputY) > 0.1: # out of the Dead zone for joystick input
-                    stateOfTelescope = MOVEMENTSTATE.MANUAL_CONTROL
-            if new_target_available: #---francis---# replace with actual check for new target availability
-                stateOfTelescope = MOVEMENTSTATE.MISSION_TO_TARGET
+            '''
+            inputX = 0 #---francis---# replace with actual input
+            inputY = 0 #---francis---# replace with actual input
+            if abs(inputX) > 0.1 and abs(inputY) > 0.1: # out of the Dead zone for joystick input
+                stateOfTelescope = MOVEMENTSTATE.MANUAL_CONTROL
 
-            if tracking_with_camera==False and stateOfTelescope == MOVEMENTSTATE.TRACKING_WITH_CAMERA: #---francis---# replace with actual check for tracking with camera mode
+            if francis.target != old_target: #---francis---# replace with actual check for new target availability
+                stateOfTelescope = MOVEMENTSTATE.MISSION_TO_TARGET
+                old_target = francis.target
+
+            if francis.gps != old_gps
+                update_postion()
+                old_gps = francis.gps
+
+            francis.t
+
+            if francis.tracking_with_camera==False and stateOfTelescope == MOVEMENTSTATE.TRACKING_WITH_CAMERA: #---francis---# replace with actual check for tracking with camera mode
                 stateOfTelescope = 0
+
             if compensateEarthrotation == False:
                 #that's it, lol
-            """
+            '''
             #----------------------------UPDATE MOVEMENT-----------------------------#
             #calculate ra and dec
             moveToTarget()
@@ -626,7 +626,7 @@ def operator_loop():
 if __name__ == "__main__":
     # setup()
     # operator_loop()
-    rise,sett =rising_setting_above_alt(celestialBody['JUPITER'],50)
+    rise,sett =rising_setting_above_alt(celestialBody['JUPITER'],0)
     print(rise)
     print(sett)
     rising_setting_time(celestialBody['JUPITER'])
