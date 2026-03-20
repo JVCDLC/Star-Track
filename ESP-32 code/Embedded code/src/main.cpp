@@ -43,13 +43,13 @@ void setup() {
   Serial.begin(115200);
   delay(500);
 
-  Serial.println("Systeme pret - detection automatique du PWM minimal");
+  Serial.println("Systeme ready - detection of switchs and motors minimum PWM...");
   switches_init();
   motors_init();
 
-  RA_find_angle_range();
-
-  calibrate_minimum_PWM();
+  //DEC_find_angle_range();
+  Serial.println("calibration of minimum PWM for the motors...");
+  //calibrate_minimum_PWM();
 
   Serial.print("PWM minimal DEC: "); Serial.println(DEC_pwm_min_real);
   Serial.print("PWM minimal RA: "); Serial.println(RA_pwm_min_real);
@@ -71,9 +71,11 @@ void setup() {
 // LOOP
 // ==========================
 void loop() {
-  Serial.println("state of switch 1: " + String(switch1_triggered));
-
-
+  //Serial.println("state of switchs: " + String(switch1_triggered)+ String(switch2_triggered)+ String(switch3_triggered)+ String(switch4_triggered)+ String(switch5_triggered)+ String(switch6_triggered)+ String(switch7_triggered)+ String(switch8_triggered)+ String(switch9_triggered)+ String(switch10_triggered));
+  DEC_drive_motor(pwm_max_driver);
+  RA_drive_motor(pwm_max_driver);
+  FOCUS_drive_motor(pwm_max_driver);
+  Serial.println(DEC_encoder_reading()+String(" ")+RA_encoder_reading()+String(" ")+FOCUS_encoder_reading());
   unsigned long now = millis();
 
   // change target angle of focus every 5 seconds for testing

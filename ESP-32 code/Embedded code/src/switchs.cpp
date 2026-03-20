@@ -19,16 +19,16 @@ volatile bool switch10_triggered = false;
 void switches_init()
 {
     // reset flags
-    switch1_triggered = true;
-    switch2_triggered = true;
-    switch3_triggered = true;
-    switch4_triggered = true;
-    switch5_triggered = true;
-    switch6_triggered = true;
-    switch7_triggered = true;
-    switch8_triggered = true;
-    switch9_triggered = true;
-    switch10_triggered = true;
+    switch1_triggered = false;
+    switch2_triggered = false;
+    switch3_triggered = false;
+    switch4_triggered = false;
+    switch5_triggered = false;
+    switch6_triggered = false;
+    switch7_triggered = false;
+    switch8_triggered = false;
+    switch9_triggered = false;
+    switch10_triggered = false;
 
     pinMode(SWITCH_1, INPUT_PULLUP);
     pinMode(SWITCH_2, INPUT_PULLUP);

@@ -167,7 +167,7 @@ long FOCUS_encoder_reading() {
     noInterrupts();
     long pos = FOCUS_encoderCount;
     interrupts();
-    Serial.print("FOCUS encoder count: "); Serial.println(pos);
+    //Serial.print("FOCUS encoder count: "); Serial.println(pos);
 
     return pos;
 }
@@ -175,7 +175,53 @@ long FOCUS_encoder_reading() {
 // ==========================
 // Find angle range for the motors using limit switchs
 // ==========================
-void DEC_find_angle_range(){}
+void DEC_find_angle_range(){
+  // move in one direction until switch is triggered
+  while (!switch4_triggered) {
+    DEC_drive_motor(pwm_max_driver);
+    delay(10);
+  }
+  
+  DEC_drive_motor(0);
+  Serial.println("Switch 2 triggered, minimum angle reached");
+  DEC_min_angle = DEC_encoder_reading();
+  // move a bit to do a second passage
+  Serial.println("Move a bit to do a second passage");
+  DEC_drive_motor(-pwm_max_driver);
+  delay(1000);
+  // second passage to be sure the initial value  is correct
+  while (!switch4_triggered) {
+    DEC_drive_motor(DEC_pwm_start_max);
+    delay(10);
+  }
+  DEC_drive_motor(0);
+  DEC_min_angle = DEC_encoder_reading();
+
+
+
+  while (!switch5_triggered) {
+    DEC_drive_motor(-DEC_pwm_start_max);
+    delay(10);
+  }
+  // move a bit to do a second passage
+  DEC_drive_motor(DEC_pwm_start_max);
+  delay(1000);
+  // second passage to be sure the initial value  is correct
+  while (!switch5_triggered) {
+    DEC_drive_motor(-DEC_pwm_start_max);
+    delay(10);
+  }
+  DEC_drive_motor(0);
+  DEC_min_angle = DEC_encoder_reading();
+
+  Serial.print("DEC angle range in ticks: ");
+  Serial.print(DEC_min_angle);
+  Serial.print(" to ");
+  Serial.println(DEC_max_angle);
+  int total_ticks = abs(DEC_max_angle - DEC_min_angle);
+  Serial.println(total_ticks);
+  
+}
 
 void RA_find_angle_range(){
   // move in one direction until switch is triggered
@@ -183,10 +229,13 @@ void RA_find_angle_range(){
     RA_drive_motor(pwm_max_driver);
     delay(10);
   }
+  
   RA_drive_motor(0);
+  Serial.println("Switch 2 triggered, minimum angle reached");
   RA_min_angle = RA_encoder_reading();
   // move a bit to do a second passage
-  RA_drive_motor(pwm_max_driver);
+  Serial.println("Move a bit to do a second passage");
+  RA_drive_motor(-pwm_max_driver);
   delay(1000);
   // second passage to be sure the initial value  is correct
   while (switch2_triggered) {
@@ -199,11 +248,11 @@ void RA_find_angle_range(){
 
 
   while (switch3_triggered) {
-    RA_drive_motor(RA_pwm_start_max);
+    RA_drive_motor(-RA_pwm_start_max);
     delay(10);
   }
   // move a bit to do a second passage
-  RA_drive_motor(-RA_pwm_start_max);
+  RA_drive_motor(RA_pwm_start_max);
   delay(1000);
   // second passage to be sure the initial value  is correct
   while (switch3_triggered) {
@@ -213,18 +262,13 @@ void RA_find_angle_range(){
   RA_drive_motor(0);
   RA_min_angle = RA_encoder_reading();
 
-  // move in the other direction until switch is triggered
-  while (switch3_triggered) {
-    RA_drive_motor(-pwm_max_driver);
-    delay(10);
-  }
-  RA_drive_motor(0);
-  RA_max_angle = RA_encoder_reading();
-
   Serial.print("RA angle range in ticks: ");
   Serial.print(RA_min_angle);
   Serial.print(" to ");
   Serial.println(RA_max_angle);
+  int total_ticks = abs(RA_max_angle - RA_min_angle);
+  Serial.println(total_ticks);
+
 }
 
 void FOCUS_find_angle_range(){}
@@ -581,7 +625,7 @@ void FOCUS_update_motor() {
 
   FOCUS_prevErrorDeg = error_deg;
   FOCUS_prevTime = now;
-  Serial.print("FOCUS error deg: "); Serial.print(error_deg); Serial.print("FOCUS error ticks: "); Serial.println(error_ticks);
+  //Serial.print("FOCUS error deg: "); Serial.print(error_deg); Serial.print("FOCUS error ticks: "); Serial.println(error_ticks);
 }
 
 
