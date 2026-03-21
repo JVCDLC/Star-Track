@@ -51,7 +51,7 @@ void DEC_drive_motor(int pwm) {
   // Constrain PWM to the allowed range
   pwm = constrain(pwm, -pwm_max_driver, pwm_max_driver);
 
-  if((!switch4_triggered && pwm > 0)||(!switch5_triggered && pwm < 0)){// STOP if switch 4 or 5 is triggered and the motor is trying to move in the direction that would trigger it
+  if((switch4_triggered && pwm > 0)||(switch5_triggered && pwm < 0)){// STOP if switch 4 or 5 is triggered and the motor is trying to move in the direction that would trigger it
     pwm = 0;
   }
 
@@ -77,7 +77,7 @@ void RA_drive_motor(int pwm) {
   // Constrain PWM to the allowed range
   pwm = constrain(pwm, -pwm_max_driver, pwm_max_driver);
 
-  if((!switch2_triggered && pwm > 0)||(!switch3_triggered && pwm < 0)){// STOP if switch 2 or 3 is triggered and the motor is trying to move in the direction that would trigger it
+  if((switch2_triggered && pwm > 0)||(switch3_triggered && pwm < 0)){// STOP if switch 2 or 3 is triggered and the motor is trying to move in the direction that would trigger it
     pwm = 0;
   }
   if (pwm > 0) {
@@ -97,7 +97,7 @@ void RA_drive_motor(int pwm) {
 void FOCUS_drive_motor(int pwm) {
 
   pwm = -constrain(pwm, -pwm_max_driver, pwm_max_driver);
-  if(!switch1_triggered && pwm > 0){// STOP if switch 1 is triggered and the motor is trying to move in the direction that would trigger it
+  if(switch1_triggered && pwm > 0){// STOP if switch 1 is triggered and the motor is trying to move in the direction that would trigger it
     pwm = 0;
   }
   if (pwm > 0) {
@@ -176,9 +176,11 @@ long FOCUS_encoder_reading() {
 // Find angle range for the motors using limit switchs
 // ==========================
 void DEC_find_angle_range(){
+  float ratio = 0.65;
   // move in one direction until switch is triggered
   while (!switch4_triggered) {
-    DEC_drive_motor(pwm_max_driver);
+    Serial.println(switch4_triggered);
+    DEC_drive_motor(ratio*pwm_max_driver);
     delay(10);
   }
   
@@ -187,11 +189,11 @@ void DEC_find_angle_range(){
   DEC_min_angle = DEC_encoder_reading();
   // move a bit to do a second passage
   Serial.println("Move a bit to do a second passage");
-  DEC_drive_motor(-pwm_max_driver);
-  delay(1000);
+  DEC_drive_motor(-ratio*pwm_max_driver);
+  delay(500);
   // second passage to be sure the initial value  is correct
   while (!switch4_triggered) {
-    DEC_drive_motor(DEC_pwm_start_max);
+    DEC_drive_motor(ratio*DEC_pwm_start_max);
     delay(10);
   }
   DEC_drive_motor(0);
@@ -200,27 +202,39 @@ void DEC_find_angle_range(){
 
 
   while (!switch5_triggered) {
-    DEC_drive_motor(-DEC_pwm_start_max);
+    DEC_drive_motor(-ratio*pwm_max_driver);
     delay(10);
   }
   // move a bit to do a second passage
-  DEC_drive_motor(DEC_pwm_start_max);
+  DEC_drive_motor(ratio*pwm_max_driver);
   delay(1000);
   // second passage to be sure the initial value  is correct
   while (!switch5_triggered) {
-    DEC_drive_motor(-DEC_pwm_start_max);
+    DEC_drive_motor(-ratio*DEC_pwm_start_max);
     delay(10);
   }
   DEC_drive_motor(0);
-  DEC_min_angle = DEC_encoder_reading();
+  DEC_max_angle = DEC_encoder_reading();
 
   Serial.print("DEC angle range in ticks: ");
   Serial.print(DEC_min_angle);
   Serial.print(" to ");
   Serial.println(DEC_max_angle);
-  int total_ticks = abs(DEC_max_angle - DEC_min_angle);
+  long total_ticks = DEC_max_angle - DEC_min_angle;
+  float middle_tick = DEC_min_angle + total_ticks / 2.0;
   Serial.println(total_ticks);
-  
+  set_motor_dec_ticks(middle_tick);
+ long pos;
+  while (true) {
+    pos = DEC_encoder_reading();
+
+    if (abs(pos - middle_tick) <= 10)
+      break;
+
+    DEC_update_motor();
+    delay(10);
+  }
+  DEC_encoderCount=0;
 }
 
 void RA_find_angle_range(){
@@ -650,6 +664,12 @@ void set_motor_dec_angle(double deg) {
   DEC_integralError = 0.0;
 }
 
+void set_motor_dec_ticks(long ticks) {
+
+  DEC_target_ticks = ticks;
+  DEC_target_degree = ticks * 360.0 / (DEC_gearbox * TICKS_PER_REV);
+  DEC_integralError = 0.0;
+}
 void set_motor_ra_angle(double deg) {
 
   RA_target_degree = deg;

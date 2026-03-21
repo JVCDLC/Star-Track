@@ -46,8 +46,11 @@ void RA_update_motor();
 void FOCUS_update_motor();
 
 void set_motor_dec_angle(double deg);
+void set_motor_dec_ticks(long ticks);
 void set_motor_ra_angle(double deg);
+void set_motor_ra_ticks(long ticks);
 void set_motor_focus_angle(double deg);
+void set_motor_focus_ticks(long ticks) ;
 
 
 #endif // MOTOR_CONSTANTS_HPP

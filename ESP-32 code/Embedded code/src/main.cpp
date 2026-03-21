@@ -46,8 +46,8 @@ void setup() {
   Serial.println("Systeme ready - detection of switchs and motors minimum PWM...");
   switches_init();
   motors_init();
-
-  //DEC_find_angle_range();
+  Serial.println("Finding angle range for DEC motor...");
+  DEC_find_angle_range();
   Serial.println("calibration of minimum PWM for the motors...");
   //calibrate_minimum_PWM();
 
@@ -72,12 +72,10 @@ void setup() {
 // ==========================
 void loop() {
   //Serial.println("state of switchs: " + String(switch1_triggered)+ String(switch2_triggered)+ String(switch3_triggered)+ String(switch4_triggered)+ String(switch5_triggered)+ String(switch6_triggered)+ String(switch7_triggered)+ String(switch8_triggered)+ String(switch9_triggered)+ String(switch10_triggered));
-  DEC_drive_motor(pwm_max_driver);
-  RA_drive_motor(pwm_max_driver);
-  FOCUS_drive_motor(pwm_max_driver);
-  Serial.println(DEC_encoder_reading()+String(" ")+RA_encoder_reading()+String(" ")+FOCUS_encoder_reading());
-  unsigned long now = millis();
 
+  //Serial.println(DEC_encoder_reading()+String(" ")+RA_encoder_reading()+String(" ")+FOCUS_encoder_reading());
+  unsigned long now = millis();
+  /*
   // change target angle of focus every 5 seconds for testing
   if (now - lastChange >= 6000) {
 
@@ -95,7 +93,7 @@ void loop() {
       set_motor_dec_angle(0);
     }
   }
-
+  */
   // update_motor() is called to update the pwm of the motors according to the target 
   // angle and the encoder reading, it is important to call it as often as possible 
   // to have a good control of the motors
