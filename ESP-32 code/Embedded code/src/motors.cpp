@@ -189,7 +189,7 @@ void DEC_find_angle_range(){
   // move a bit to do a second passage
   Serial.println("Move a bit to do a second passage");
   DEC_drive_motor(-ratio*pwm_max_driver);
-  delay(500);
+  delay(250);
   // second passage to be sure the initial value  is correct
   while (!switch4_triggered) {
     DEC_drive_motor(ratio*DEC_pwm_start_max);
@@ -206,7 +206,7 @@ void DEC_find_angle_range(){
   }
   // move a bit to do a second passage
   DEC_drive_motor(ratio*pwm_max_driver);
-  delay(500);
+  delay(250);
   // second passage to be sure the initial value  is correct
   while (!switch5_triggered) {
     DEC_drive_motor(-ratio*DEC_pwm_start_max);
@@ -227,18 +227,20 @@ void DEC_find_angle_range(){
   while (true) {
     pos = DEC_encoder_reading();
 
-    if (abs(pos - middle_tick) <= 10)
+    if (abs(pos - middle_tick) <= 1)
       break;
 
     DEC_update_motor();
     delay(10);
   }
+  DEC_drive_motor(0);
   DEC_encoderCount=0;
+  set_motor_dec_ticks(0);
 }
 
 void RA_find_angle_range(){
   // move in one direction until switch is triggered
-  while (switch2_triggered) {
+  while (!switch2_triggered) {
     RA_drive_motor(pwm_max_driver);
     delay(10);
   }
@@ -251,25 +253,25 @@ void RA_find_angle_range(){
   RA_drive_motor(-pwm_max_driver);
   delay(1000);
   // second passage to be sure the initial value  is correct
-  while (switch2_triggered) {
-    RA_drive_motor(RA_pwm_start_max);
+  while (!switch2_triggered) {
+    RA_drive_motor(0.8*pwm_max_driver);
     delay(10);
   }
   RA_drive_motor(0);
-  RA_min_angle = RA_encoder_reading();
+  RA_max_angle = RA_encoder_reading();
 
 
 
-  while (switch3_triggered) {
-    RA_drive_motor(-RA_pwm_start_max);
+  while (!switch3_triggered) {
+    RA_drive_motor(-pwm_max_driver);
     delay(10);
   }
   // move a bit to do a second passage
-  RA_drive_motor(RA_pwm_start_max);
+  RA_drive_motor(pwm_max_driver);
   delay(1000);
   // second passage to be sure the initial value  is correct
-  while (switch3_triggered) {
-    RA_drive_motor(-RA_pwm_start_max);
+  while (!switch3_triggered) {
+    RA_drive_motor(-0.8*pwm_max_driver);
     delay(10);
   }
   RA_drive_motor(0);
@@ -279,12 +281,51 @@ void RA_find_angle_range(){
   Serial.print(RA_min_angle);
   Serial.print(" to ");
   Serial.println(RA_max_angle);
-  int total_ticks = abs(RA_max_angle - RA_min_angle);
+  long total_ticks = RA_max_angle - RA_min_angle;
+  long middle_tick = RA_min_angle + total_ticks / 2.0;
   Serial.println(total_ticks);
+  Serial.print("RA middle tick: ");Serial.println(middle_tick);
+  set_motor_ra_ticks(middle_tick);
+ long pos;
+  while (true) {
+    pos = RA_encoder_reading();
 
+    if (abs(pos - middle_tick) <= 1)
+      break;
+
+    RA_update_motor();
+    delay(10);
+  }
+  RA_drive_motor(0);
+  RA_encoderCount=0;
+  set_motor_ra_ticks(0);
 }
 
-void FOCUS_find_angle_range(){}
+void FOCUS_find_angle_range(){
+  float ratio = 0.65;
+  // move in one direction until switch is triggered
+  while (!switch4_triggered) {
+    FOCUS_drive_motor(ratio*pwm_max_driver);
+    delay(10);
+  }
+  
+  FOCUS_drive_motor(0);
+  Serial.println("Switch 1 triggered, minimum angle reached");
+  FOCUS_min_angle = FOCUS_encoder_reading();
+  // move a bit to do a second passage
+  Serial.println("Move a bit to do a second passage");
+  FOCUS_drive_motor(-ratio*pwm_max_driver);
+  delay(250);
+  // second passage to be sure the initial value  is correct
+  while (!switch4_triggered) {
+    FOCUS_drive_motor(ratio*FOCUS_pwm_start_max);
+    delay(10);
+  }
+  FOCUS_drive_motor(0);
+  FOCUS_min_angle = FOCUS_encoder_reading();
+  FOCUS_encoderCount=0;
+  set_motor_focus_ticks(0);
+}
 
 // ==========================
 // Find minimum PWM
@@ -481,6 +522,7 @@ void find_angle_range() {
   //DEC_find_angle_range();
   //FOCUS_find_angle_range();
 }
+
 // ==========================
 // PID DEC
 // ==========================
@@ -669,10 +711,18 @@ void set_motor_dec_ticks(long ticks) {
   DEC_target_degree = ticks * 360.0 / (DEC_gearbox * TICKS_PER_REV);
   DEC_integralError = 0.0;
 }
+
 void set_motor_ra_angle(double deg) {
 
   RA_target_degree = deg;
   RA_target_ticks = RA_target_degree * RA_gearbox * TICKS_PER_REV / 360.0;
+  RA_integralError = 0.0;
+}
+
+void set_motor_ra_ticks(long ticks) {
+
+  RA_target_ticks = ticks;
+  RA_target_degree = ticks * 360.0 / (RA_gearbox * TICKS_PER_REV);
   RA_integralError = 0.0;
 }
 
@@ -683,6 +733,12 @@ void set_motor_focus_angle(double deg) {
   FOCUS_integralError = 0.0;
 }
 
+void set_motor_focus_ticks(long ticks) {
+
+  FOCUS_target_ticks = ticks;
+  FOCUS_target_degree = ticks * 360.0 / (FOCUS_gearbox * TICKS_PER_REV);
+  FOCUS_integralError = 0.0;
+}
 
 // ==========================
 // Init motors
@@ -738,3 +794,4 @@ void motors_init() {
   pinMode(FOCUS_DIR, OUTPUT);
   pinMode(FOCUS_PWM, OUTPUT);
 }
+

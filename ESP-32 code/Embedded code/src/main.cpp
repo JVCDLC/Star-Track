@@ -46,6 +46,8 @@ void setup() {
   Serial.println("Systeme ready - detection of switchs and motors minimum PWM...");
   switches_init();
   motors_init();
+  Serial.println("Finding angle range for RA motor...");
+  RA_find_angle_range();
   Serial.println("Finding angle range for DEC motor...");
   DEC_find_angle_range();
   Serial.println("calibration of minimum PWM for the motors...");
@@ -64,8 +66,6 @@ void setup() {
   delay(500);
 }
 
-  static unsigned long lastChange = 0;
-  static bool at360 = false;
 
 // ==========================
 // LOOP
