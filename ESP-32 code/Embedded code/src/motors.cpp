@@ -179,7 +179,6 @@ void DEC_find_angle_range(){
   float ratio = 0.65;
   // move in one direction until switch is triggered
   while (!switch4_triggered) {
-    Serial.println(switch4_triggered);
     DEC_drive_motor(ratio*pwm_max_driver);
     delay(10);
   }
@@ -207,7 +206,7 @@ void DEC_find_angle_range(){
   }
   // move a bit to do a second passage
   DEC_drive_motor(ratio*pwm_max_driver);
-  delay(1000);
+  delay(500);
   // second passage to be sure the initial value  is correct
   while (!switch5_triggered) {
     DEC_drive_motor(-ratio*DEC_pwm_start_max);
