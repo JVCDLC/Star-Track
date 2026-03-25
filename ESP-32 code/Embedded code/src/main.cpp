@@ -51,7 +51,7 @@ void setup() {
   Serial.println("Finding angle range for DEC motor...");
   DEC_find_angle_range();
   Serial.println("calibration of minimum PWM for the motors...");
-  //calibrate_minimum_PWM();
+  calibrate_minimum_PWM();
 
   Serial.print("PWM minimal DEC: "); Serial.println(DEC_pwm_min_real);
   Serial.print("PWM minimal RA: "); Serial.println(RA_pwm_min_real);

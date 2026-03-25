@@ -30,7 +30,7 @@ const int8_t quadTable[16] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
 
 // Motor constants
 const int DEC_pwm_start_max = 120; // PWM maximal for the calibration test, if the minimum PWM is higher than this value, the test is redone
-const double DEC_gearbox = 50*18;
+const double DEC_gearbox = 900.0;
 const double DEC_Kp = 25.0;   // Proportional gain
 const double DEC_Ki = 0.025;     // Integral gain
 const double DEC_Kd = 0.001;   // Derivative gain
@@ -51,8 +51,8 @@ const double DEC_Kd = 0.001;   // Derivative gain
 
 // Motor constants
 const int RA_pwm_start_max = 120; // PWM maximal for the calibration test, if the minimum PWM is higher than this value, the test is redone
-const double RA_gearbox = 23*18*50;
-const double RA_Kp = 200.0;    // Proportional gain
+const double RA_gearbox = 900.0;
+const double RA_Kp = 25.0;    // Proportional gain
 const double RA_Ki = 0.025;     // Integral gain
 const double RA_Kd = 0.001;   // Derivative gain
 

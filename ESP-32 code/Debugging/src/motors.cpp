@@ -2,11 +2,11 @@
 #include "constants.hpp"
 #include "motors.hpp"
 
-int DEC_pwm_min_real = 170;
+int DEC_pwm_min_real = 150;
 volatile long DEC_encoderCount = 0;
 volatile uint8_t DEC_prevState = 0;
 
-int RA_pwm_min_real = 170;
+int RA_pwm_min_real = 150;
 volatile long RA_encoderCount = 0;
 volatile uint8_t RA_prevState = 0;
 
@@ -94,7 +94,7 @@ void RA_drive_motor(int pwm) {
   }
 }
 
-void FOCUS_drive_motor(int pwm) {
+void FOC_drive_motor(int pwm) {
 
   pwm = -constrain(pwm, -pwm_max_driver, pwm_max_driver);
   if(switch1_triggered && pwm > 0){// STOP if switch 1 is triggered and the motor is trying to move in the direction that would trigger it
@@ -161,7 +161,7 @@ long RA_encoder_reading() {
   return pos;
 }
 
-long FOCUS_encoder_reading() {
+long FOC_encoder_reading() {
 
     
     noInterrupts();
@@ -181,6 +181,7 @@ void DEC_find_angle_range(){
   while (!switch4_triggered) {
     DEC_drive_motor(ratio*pwm_max_driver);
     delay(10);
+    Serial.print(switch4_triggered); Serial.print(" "); Serial.println(switch5_triggered);
   }
   
   DEC_drive_motor(0);
@@ -222,9 +223,10 @@ void DEC_find_angle_range(){
   long total_ticks = DEC_max_angle - DEC_min_angle;
   float middle_tick = DEC_min_angle + total_ticks / 2.0;
   Serial.println(total_ticks);
-  set_motor_dec_ticks(middle_tick);
+  set_motor_DEC_ticks(middle_tick);
  long pos;
   while (true) {
+    pos = DEC_encoder_reading();
 
     if (abs(pos - middle_tick) <= 1)
       break;
@@ -234,7 +236,7 @@ void DEC_find_angle_range(){
   }
   DEC_drive_motor(0);
   DEC_encoderCount=0;
-  set_motor_dec_ticks(0);
+  set_motor_DEC_ticks(0);
 }
 
 void RA_find_angle_range(){
@@ -280,20 +282,18 @@ void RA_find_angle_range(){
   Serial.print(RA_min_angle);
   Serial.print(" to ");
   Serial.println(RA_max_angle);
-  long total_ticks = abs(RA_max_angle) + abs(RA_min_angle);
+  long total_ticks = RA_max_angle - RA_min_angle;
   long middle_tick = RA_min_angle + total_ticks / 2.0;
   Serial.println(total_ticks);
   Serial.print("RA middle tick: ");Serial.println(middle_tick);
-  set_motor_ra_ticks(middle_tick);
+  set_motor_RA_ticks(middle_tick);
  long pos;
   while (true) {
+    Serial.print("RA encoder reading: "); Serial.println(RA_encoder_reading());
+    Serial.print(switch3_triggered); Serial.print(" "); Serial.println(switch2_triggered);
     pos = RA_encoder_reading();
-    Serial.print(switch2_triggered); Serial.print(" "); Serial.println(switch3_triggered);
-    Serial.print("RA encoder reading: "); Serial.println(pos);
-    Serial.print("RA middle tick: "); Serial.println(RA_target_ticks);
-    Serial.print("Middle tick");Serial.println(middle_tick);
 
-    if (abs(pos - middle_tick) <= 2)
+    if (abs(pos - middle_tick) <= 1)
       break;
 
     RA_update_motor();
@@ -301,33 +301,33 @@ void RA_find_angle_range(){
   }
   RA_drive_motor(0);
   RA_encoderCount=0;
-  set_motor_ra_ticks(0);
+  set_motor_RA_ticks(0);
 }
 
-void FOCUS_find_angle_range(){
-  float ratio = 0.65;
+void FOC_find_angle_range(){
+  float ratio = 0.55;
   // move in one direction until switch is triggered
-  while (!switch4_triggered) {
-    FOCUS_drive_motor(ratio*pwm_max_driver);
+  while (!switch1_triggered) {
+    FOC_drive_motor(ratio*pwm_max_driver);
     delay(10);
   }
   
-  FOCUS_drive_motor(0);
+  FOC_drive_motor(0);
   Serial.println("Switch 1 triggered, minimum angle reached");
-  FOCUS_min_angle = FOCUS_encoder_reading();
+  FOCUS_min_angle = FOC_encoder_reading();
   // move a bit to do a second passage
   Serial.println("Move a bit to do a second passage");
-  FOCUS_drive_motor(-ratio*pwm_max_driver);
-  delay(250);
+  FOC_drive_motor(-ratio*pwm_max_driver);
+  delay(500);
   // second passage to be sure the initial value  is correct
-  while (!switch4_triggered) {
-    FOCUS_drive_motor(ratio*FOCUS_pwm_start_max);
+  while (!switch1_triggered) {
+    FOC_drive_motor(ratio*FOCUS_pwm_start_max);
     delay(10);
   }
-  FOCUS_drive_motor(0);
-  FOCUS_min_angle = FOCUS_encoder_reading();
+  FOC_drive_motor(0);
+  FOCUS_min_angle = FOC_encoder_reading();
   FOCUS_encoderCount=0;
-  set_motor_focus_ticks(0);
+  set_motor_FOC_ticks(0);
 }
 
 // ==========================
@@ -413,7 +413,7 @@ int RA_find_minimum_PWM() {
   return pwm_max_driver;
 }
 
-int FOCUS_find_minimum_PWM() {
+int FOC_find_minimum_PWM() {
 
   int step = 1;
   int pwm = 50 - step;
@@ -422,19 +422,19 @@ int FOCUS_find_minimum_PWM() {
 
     pwm += step;
 
-    long startPos = FOCUS_encoder_reading();
-    FOCUS_drive_motor(pwm);
+    long startPos = FOC_encoder_reading();
+    FOC_drive_motor(pwm);
 
     Serial.print("Testing FOCUS PWM: ");
     Serial.println(pwm);
 
     delay(200);
 
-    long delta = abs(FOCUS_encoder_reading() - startPos);
+    long delta = abs(FOC_encoder_reading() - startPos);
 
     if (delta >= 5) {
 
-      FOCUS_drive_motor(0);
+      FOC_drive_motor(0);
       delay(200);
       return pwm;
     }
@@ -447,7 +447,7 @@ int FOCUS_find_minimum_PWM() {
     }
   }
 
-  FOCUS_drive_motor(0);
+  FOC_drive_motor(0);
   return pwm_max_driver;
 }
 
@@ -456,6 +456,7 @@ int FOCUS_find_minimum_PWM() {
 // ==========================
 void calibrate_minimum_PWM() {
   DEC_pwm_min_real = 0;
+/*
   for (int i = 0; i < repetitions; i++) {
 
     int DEC_pwm = 0;
@@ -470,7 +471,7 @@ void calibrate_minimum_PWM() {
       DEC_pwm_min_real = DEC_pwm;
     }
   }
-  
+  */
 
   RA_pwm_min_real = 0;
 
@@ -490,7 +491,7 @@ void calibrate_minimum_PWM() {
   }
 
   FOCUS_pwm_min_real = 0;
-/*
+
   for (int i = 0; i < repetitions; i++) {
 
     int pwm = 0;
@@ -499,13 +500,13 @@ void calibrate_minimum_PWM() {
     Serial.print(i + 1);
     Serial.println(" off PWM minimal...");
 
-    pwm = FOCUS_find_minimum_PWM();
+    pwm = FOC_find_minimum_PWM();
 
     if (pwm > FOCUS_pwm_min_real) {
       FOCUS_pwm_min_real = pwm;
     }
   }
-*/
+
   Serial.print("DEC PWM detecte: ");
   Serial.println(DEC_pwm_min_real);
 
@@ -590,20 +591,12 @@ void RA_update_motor() {
   if (dt <= 0) dt = 0.001;
 
   long pos = RA_encoder_reading();
-  Serial.print("=== RA_update_motor ===\n");
-  Serial.print("Timestamp (ms): "); Serial.println(now);
-  Serial.print("dt (s): "); Serial.println(dt, 6);
-  Serial.print("RA encoder reading: "); Serial.println(pos);
-  Serial.print("RA target ticks: "); Serial.println(RA_target_ticks);
 
   long error_ticks = RA_target_ticks - pos;
-  Serial.print("RA error ticks: "); Serial.println(error_ticks);
-  double error_deg = error_ticks * 360.0 / TICKS_PER_REV / RA_gearbox;
-  Serial.print("Error (deg): "); Serial.println(error_deg, 4);
 
+  double error_deg = error_ticks * 360.0 / TICKS_PER_REV / RA_gearbox;
 
   double p_term = RA_Kp * error_deg;
-  Serial.print("P-term (Kp="); Serial.print(RA_Kp); Serial.print("): "); Serial.println(p_term, 4);
 
   RA_integralError += error_deg * dt;
 
@@ -611,38 +604,28 @@ void RA_update_motor() {
   if (RA_integralError < -100) RA_integralError = -100;
 
   double i_term = RA_Ki * RA_integralError;
-  Serial.print("Integral Error (clamped): "); Serial.println(RA_integralError, 4);
-  Serial.print("I-term (Ki="); Serial.print(RA_Ki); Serial.print("): "); Serial.println(i_term, 4);
 
   double d_error = (error_deg - RA_prevErrorDeg) / dt;
 
   double d_term = RA_Kd * d_error;
-  Serial.print("D-error (deg/s): "); Serial.println(d_error, 4);
-  Serial.print("D-term (Kd="); Serial.print(RA_Kd); Serial.print("): "); Serial.println(d_term, 6);
 
   double pwm_f = p_term + i_term + d_term;
-  Serial.print("PID Sum (P+I+D): "); Serial.println(pwm_f, 2);
-  if (pwm_f > 1000) pwm_f = 1000;
-  if (pwm_f < -1000) pwm_f = -1000;
+
   int pwm = (int)pwm_f;
-  Serial.print("PWM (int cast): "); Serial.println(pwm);
 
   pwm = constrain(pwm, -pwm_max_driver, pwm_max_driver);
-  Serial.print("PWM (constrained): "); Serial.println(pwm);
 
   if (pwm > 0 && pwm < RA_pwm_min_real) {
-    Serial.print("Applying deadband (min_real="); Serial.print(RA_pwm_min_real); Serial.println(")");
+
     pwm = RA_pwm_min_real;
     RA_integralError = 0;
   }
 
   if (pwm < 0 && pwm > -RA_pwm_min_real) {
-    Serial.print("Applying negative deadband (min_real="); Serial.print(RA_pwm_min_real); Serial.println(")");
+
     pwm = -RA_pwm_min_real;
     RA_integralError = 0;
   }
-  Serial.print("PWM RA (final): "); Serial.println(pwm);
-  Serial.println("---\n");
 
   RA_drive_motor(pwm);
 
@@ -654,14 +637,14 @@ void RA_update_motor() {
 // PID FOCUS
 // ==========================
 
-void FOCUS_update_motor() {
+void FOC_update_motor() {
 
   unsigned long now = millis();
 
   double dt = (now - FOCUS_prevTime) / 1000.0;
   if (dt <= 0) dt = 0.001;
 
-  long pos = FOCUS_encoder_reading();
+  long pos = FOC_encoder_reading();
 
   long error_ticks = FOCUS_target_ticks - pos;
 
@@ -696,7 +679,7 @@ void FOCUS_update_motor() {
     FOCUS_integralError = 0;
   }
 
-  FOCUS_drive_motor(pwm);
+  FOC_drive_motor(pwm);
 
   FOCUS_prevErrorDeg = error_deg;
   FOCUS_prevTime = now;
@@ -711,51 +694,49 @@ void update_motor() {
 
   DEC_update_motor();
   RA_update_motor();
-  FOCUS_update_motor();
+  FOC_update_motor();
 }
 
 
 // ==========================
 // Set target
 // ==========================
-void set_motor_dec_angle(double deg) {
+void set_motor_DEC_angle(double deg) {
 
   DEC_target_degree = deg;
   DEC_target_ticks = deg * DEC_gearbox * TICKS_PER_REV / 360.0;
   DEC_integralError = 0.0;
 }
 
-void set_motor_dec_ticks(long ticks) {
+void set_motor_DEC_ticks(long ticks) {
 
   DEC_target_ticks = ticks;
   DEC_target_degree = ticks * 360.0 / (DEC_gearbox * TICKS_PER_REV);
   DEC_integralError = 0.0;
 }
 
-void set_motor_ra_angle(double deg) {
+void set_motor_RA_angle(double deg) {
 
   RA_target_degree = deg;
   RA_target_ticks = RA_target_degree * RA_gearbox * TICKS_PER_REV / 360.0;
   RA_integralError = 0.0;
 }
 
-void set_motor_ra_ticks(long ticks) {
+void set_motor_RA_ticks(long ticks) {
 
   RA_target_ticks = ticks;
   RA_target_degree = ticks * 360.0 / (RA_gearbox * TICKS_PER_REV);
   RA_integralError = 0.0;
-  RA_prevErrorDeg = 0.0;
-  RA_prevTime = millis();
 }
 
-void set_motor_focus_angle(double deg) {
+void set_motor_FOC_angle(double deg) {
 
   FOCUS_target_degree = deg;
   FOCUS_target_ticks = FOCUS_target_degree * FOCUS_gearbox * TICKS_PER_REV / 360.0;
   FOCUS_integralError = 0.0;
 }
 
-void set_motor_focus_ticks(long ticks) {
+void set_motor_FOC_ticks(long ticks) {
 
   FOCUS_target_ticks = ticks;
   FOCUS_target_degree = ticks * 360.0 / (FOCUS_gearbox * TICKS_PER_REV);
