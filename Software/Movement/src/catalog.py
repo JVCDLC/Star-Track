@@ -5,12 +5,12 @@ CATALOG = {
     "tab-solar": [
         {"id": "sun", "name": "SUN", "icon": "☀️"},
         {"id": "moon", "name": "MOON", "icon": "🌙"},
-        {"id": "mercury", "name": "MERCURY", "icon": "🟡"},
-        {"id": "venus", "name": "VENUS", "icon": "⚪"},
-        {"id": "mars", "name": "MARS", "icon": "🏖️"},
-        {"id": "jupiter barycenter", "name": "JUPITER", "icon": "🏀"},
+        {"id": "mercury", "name": "MERCURY", "icon": "🐦‍🔥"},
+        {"id": "venus", "name": "VENUS", "icon": "💘"},
+        {"id": "mars", "name": "MARS", "icon": "⚔️"},
+        {"id": "jupiter barycenter", "name": "JUPITER", "icon": "⚡"},
         {"id": "saturn barycenter", "name": "SATURNE", "icon": "🪐"},
-        {"id": "uranus barycenter", "name": "URANUS", "icon": "🔵"},
+        {"id": "uranus barycenter", "name": "URANUS", "icon": "🌪️"},
         {"id": "neptune barycenter", "name": "NEPTUNE", "icon": "⚓"}
     ],
     "tab-stars": [
