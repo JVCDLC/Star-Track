@@ -3,11 +3,13 @@ import time
 import catalog; from catalog import CATALOG
 from skyfield.api import load, Star, wgs84, Topos
 from skyfield.data import hipparcos
-from datetime import timedelta
+from datetime import timedelta, datetime
+
 from enum import Enum
 from skyfield import almanac
 from pytz import timezone
 from timezonefinder import TimezoneFinder
+from zoneinfo import ZoneInfo
 
 #console input without blocking the main loop
 try:
@@ -47,7 +49,7 @@ visibleCatalog = CATALOG
 latitude = 45.365434 #  N 45° 21' 55.563''
 longitude = -71.939477 # W 71° 56' 22.115''
 observer = earth + wgs84.latlon(latitude, longitude) # topos????
-timeZone = 'America/Toronto'
+timeZone = timezone('America/Toronto')
 
 #-------------------------------------------------------------------------------------------#
 
@@ -80,30 +82,33 @@ decToMotor = 0 # Declination in degrees
 focusToMotor = 0
 
 #Variables for movement
+STEP_PER_ROTATION_RA = 2442.96*18*23 #TIC/ROTATION
+STEP_PER_ROTATION_DEC = 2442.96*18  #TIC/ROTATION
+EARTH_ROTATION_SPEED_RA = STEP_PER_ROTATION_RA/(24*3600) #TIC/SEC
+
+MANUAL_SPEED_MAX_RA = 5*EARTH_ROTATION_SPEED_RA # TIC/SEC
+MAX_INPUT_FROM_JOYSTICK = [-1,1]
+
+
 INTERVALS = {
     'variable_update': 0.01,
     'tracking': 10,
     'manual': 0.1,
-    'earth_rotation': 2
+    'earth_rotation': 1/EARTH_ROTATION_SPEED_RA
 }
 
 next_updates = {key: time.monotonic() + interval for key, interval in INTERVALS.items()}
 
 
-EARTH_ROTATION_SPEED = 360/24/3600 # degrees per sec : 0.0041667 min_motor_speed : 0,00833
-MANUAL_SPEED_MAX = 5*EARTH_ROTATION_SPEED # degees per second 
-MAX_INPUT_FROM_JOYSTICK = [-1,1]
-RA_MINIMUM = 0.00833 ###########TO CHANGE ONE NEW GEAR# minimum change in RA to send a new command to the motors in degrees
-DEC_MINIMUM = 0.00833 # minimum change in Dec to send a new command to
 #-----------------------------------------------------------#
 #camera spec
 FOCAL_LENGHT_mm = 400
 CAMERA_PIXEL_SIZE_um = 5.2
-PIXEL_TO_ANGLE_deg = ( (CAMERA_PIXEL_SIZE_um /1000 )/ FOCAL_LENGHT_mm) * (180/np.pi) # Angle subtended by one pixel in degrees
+PIXEL_TO_STEP_RA = ( (CAMERA_PIXEL_SIZE_um /1000 )/ FOCAL_LENGHT_mm) * (STEP_PER_ROTATION_RA/(2*np.pi)) # Angle subtended by one pixel in degrees
+PIXEL_TO_STEP_DEC = ( (CAMERA_PIXEL_SIZE_um /1000 )/ FOCAL_LENGHT_mm) * (STEP_PER_ROTATION_DEC/(2*np.pi)) # Angle subtended by one pixel in degrees
 X_RESOLUTION = 1304
 Y_RESOLUTION = 976
-fieldOfViewX_deg = PIXEL_TO_ANGLE_deg * X_RESOLUTION
-fieldOfViewY_deg = PIXEL_TO_ANGLE_deg * Y_RESOLUTION
+
 
 camAngle = 0 # angle of the camera in degrees, 0 -> top , 90 -> right
 #---------------------------END OF GLOBAL VARIABLES--------------------------------{
@@ -117,6 +122,34 @@ camAngle = 0 # angle of the camera in degrees, 0 -> top , 90 -> right
 
 
 #----------------------ATRONOMICAL CALCULATION FUNCTION-------------------------------------#
+
+def updateCurrentTime(importedTime = None):
+    """
+        set the current time 
+        input: tt : list of [year, month, day, hour, min, sec, mico-sec (6 digits)]
+        output: None
+    """
+    global currentTime, timeZone
+   
+    if importedTime == None:
+        currentTime = timeScale.now()
+    
+    else:
+        timeZoneInfo = ZoneInfo(str(timeZone))
+        print('tz info', timeZoneInfo)
+        dateTime = datetime(importedTime[0],importedTime[1],importedTime[2], #year, month, day
+                            importedTime[3],importedTime[4],importedTime[5], #hour, min, sec
+                            importedTime[6], tzinfo = timeZoneInfo )                                # micro sec (1/1 000 000) of second
+        print(dateTime)
+       
+       
+        currentTime = timeScale.from_datetime(dateTime.replace(fold=1))
+        print('fold test')
+        print(str(timeScale.from_datetime(dateTime.replace(fold=0))))
+        print(str(timeScale.from_datetime(dateTime.replace(fold=1))))
+    
+    print("temps :" +str(currentTime.astimezone(timeZone)))
+
 def updateLocation(lat,lon):
     """
         Update the observer location
@@ -127,10 +160,17 @@ def updateLocation(lat,lon):
     global observer
     global timeZone
     observer = earth + wgs84.latlon(lat, lon)
-    timeZone = str(timezone_from_position(lat,lon))
+    timeZone = timezone_from_position(lat,lon)
     return
 
 def timezone_from_position(lat, lon):
+    """
+        used in updateLocation
+        Inputs: lat : Latitude in decimal degrees
+                lon : Longitude in decimal degrees
+        Outputs: timezone
+    
+    """
     tf = TimezoneFinder()
     tz_name = tf.timezone_at(lat=lat, lng=lon)
     if tz_name is None:
@@ -400,12 +440,14 @@ def recenterWithCamera(BodyCenterX, BodyCenterY):
         return
     else:
         # Calculate the movement needed to recenter the object
-        moveX = PIXEL_TO_ANGLE_deg*(BodyCenterX - X_RESOLUTION/2)
-        moveY = PIXEL_TO_ANGLE_deg*(BodyCenterY - Y_RESOLUTION/2)
+        moveX = (BodyCenterX - X_RESOLUTION/2)
+        moveY = (BodyCenterY - Y_RESOLUTION/2)
         print(f"Moving camera to recenter object: moveX={moveX}, moveY={moveY}")
         # Convert the movement in pixels to HA/Dec changes and update raToMotor and decToMotor accordingly
         haChange, decChange = rotateXYtoHADEC(moveX, moveY)
-        return haChange, decChange
+        HAChange = haChange*PIXEL_TO_STEP_RA
+        DECChange = decChange*PIXEL_TO_STEP_DEC
+        return HAChange, DECChange
 
 def moveManually(inputX, inputY):
     """
@@ -424,11 +466,13 @@ def moveManually(inputX, inputY):
         inputY = MAX_INPUT_FROM_JOYSTICK[0]
 
     # Convert the joystick inputs to degrees of movement
-    moveX = (inputX / (MAX_INPUT_FROM_JOYSTICK[1] - MAX_INPUT_FROM_JOYSTICK[0])) * MANUAL_SPEED_MAX
-    moveY = (inputY / (MAX_INPUT_FROM_JOYSTICK[1] - MAX_INPUT_FROM_JOYSTICK[0])) * MANUAL_SPEED_MAX
+    moveX = (inputX / (MAX_INPUT_FROM_JOYSTICK[1] - MAX_INPUT_FROM_JOYSTICK[0]))
+    moveY = (inputY / (MAX_INPUT_FROM_JOYSTICK[1] - MAX_INPUT_FROM_JOYSTICK[0])) 
 
     [ha,dec] = rotateXYtoHADEC(moveX, moveY)
-    return ha, dec
+    HA = ha * MANUAL_SPEED_MAX_RA
+    DEC = dec* MANUAL_SPEED_MAX_RA/24
+    return HA, DEC
 
 def moveToTarget():
     """
@@ -502,7 +546,7 @@ def moveToTarget():
     if compensateEarthrotation:
         if now >= next_updates['earth_rotation']:
             next_updates['earth_rotation'] += INTERVALS['earth_rotation']
-            raToMotor += EARTH_ROTATION_SPEED * INTERVALS['earth_rotation'] # add earth rotation to ra
+            raToMotor += EARTH_ROTATION_SPEED_RA * INTERVALS['earth_rotation'] # add earth rotation to ra
 
 
     print(f"Moving to RA: {raToMotor:.4f}°, Dec: {decToMotor:.4f}°")
@@ -527,6 +571,8 @@ def setup():
 #--------------------------     LOOP       --------------------------------------#
 
 def operator_loop():
+    lastDecToMotor = 0
+    lastRaToMotor = 0
     while True:
         # example operation prior to waiting, could call moveToTarget()
         
@@ -578,12 +624,12 @@ def operator_loop():
                 break
             """
             #send info to jp if > min ra or > min dec avaliable
-            if abs(raToMotor - lastRaToMotor) > RA_MINIMUM:
+            if abs(raToMotor - lastRaToMotor) > 1: # more than 1 tick
                 lastRaToMotor = raToMotor
                 #send raToMotor to JP for motor control
                 pass
             
-            if abs(decToMotor - lastDecToMotor) > DEC_MINIMUM:
+            if abs(decToMotor - lastDecToMotor) > 1: # more than 1 tick
                 lastDecToMotor = decToMotor
                 #send decToMotor to JP for motor control
                 pass
@@ -626,11 +672,12 @@ def operator_loop():
 if __name__ == "__main__":
     # setup()
     # operator_loop()
-    rise,sett =rising_setting_above_alt(celestialBody['JUPITER'],0)
-    print(rise)
-    print(sett)
-    rising_setting_time(celestialBody['JUPITER'])
-    print_visible_catalog()
+    # rise,sett =rising_setting_above_alt(celestialBody['JUPITER'],0)
+    # print(rise)
+    # print(sett)
+    # rising_setting_time(celestialBody['JUPITER'])
+    # print_visible_catalog()
+    
     pass
 
         
