@@ -6,6 +6,11 @@
 
 namespace refactored {
 
+/**
+ * @brief Constructor for MotorBase.
+ * Initializes all member variables with provided configuration and default values.
+ * Sets up initial state as uninitialized, with stiction floors starting at calibration minimum.
+ */
 MotorBase::MotorBase(const char* name,
                      MotorId encoderId,
                      const PidConfig& pid,
@@ -20,22 +25,24 @@ MotorBase::MotorBase(const char* name,
       m_limits(limits),
       m_calibration(calibration),
       m_precision(precision),
-      m_motionMode(MotionMode::POSITION),
-      m_state(MotorState::UNINITIALIZED),
-      m_limitsKnown(false),
+      m_motionMode(MotionMode::POSITION),          // Default to position control
+      m_state(MotorState::UNINITIALIZED),          // Start uninitialized
+      m_limitsKnown(false),                        // Limits not yet calibrated
       m_limitMinTick(0),
       m_limitMaxTick(0),
       m_targetTicks(0),
-      m_errorIntegral(0.0f),
+      m_errorIntegral(0.0f),                       // PID integral starts at zero
       m_prevErrorTicks(0),
       m_lastControlMs(0),
       m_lastMotionMs(0),
       m_lastObservedTick(0),
       m_lastAppliedDirection(0),
+      // Initialize stiction floors to calibration start value
       m_stictionMinPwmPos(calibration.stictionScanStartPwm),
       m_stictionMinPwmNeg(calibration.stictionScanStartPwm),
       m_adaptiveMinPwmPos(calibration.stictionScanStartPwm),
       m_adaptiveMinPwmNeg(calibration.stictionScanStartPwm),
+      // Calibration scratch variables
       m_calCapturedMinTick(0),
       m_calCapturedMaxTick(0),
       m_calFirstHitTick(0),
@@ -43,101 +50,160 @@ MotorBase::MotorBase(const char* name,
       m_calStateStartMs(0),
       m_releaseStableStartMs(0),
       m_centerStableStartMs(0),
+      // Stiction scan state
       m_scanStepActive(false),
       m_scanPwm(0),
       m_scanStartTick(0),
       m_scanStepStartMs(0),
+      // Micro-correction state
       m_microStartMs(0),
       m_microDirection(0) {}
 
+/**
+ * @brief Returns the sign of a long integer value.
+ * @param value The value to check
+ * @return 1 if positive, -1 if negative, 0 if zero
+ */
 int8_t MotorBase::signOf(long value) {
   if (value > 0) return 1;
   if (value < 0) return -1;
   return 0;
 }
 
+/**
+ * @brief Returns the absolute value of a long integer.
+ * @param value The value to take absolute value of
+ * @return Absolute value as long
+ */
 long MotorBase::absLong(long value) {
   return (value < 0) ? -value : value;
 }
 
+/**
+ * @brief Initialize the motor hardware.
+ * Sets up driver pins, zeros PWM output, and sets initial state to stopped.
+ * Records current position as target to prevent unwanted movement.
+ */
 void MotorBase::begin() {
-  setupDriverPins();
-  applyDriverPwm(0);
-  m_lastAppliedDirection = 0;
-  m_targetTicks = readTicks();
-  m_lastObservedTick = m_targetTicks;
-  m_lastControlMs = millis();
-  m_lastMotionMs = m_lastControlMs;
-  m_state = MotorState::STOPPED;
+  setupDriverPins();                    // Configure hardware pins (virtual call)
+  applyDriverPwm(0);                    // Ensure motor is stopped
+  m_lastAppliedDirection = 0;           // No direction applied yet
+  m_targetTicks = readTicks();          // Set target to current position
+  m_lastObservedTick = m_targetTicks;   // Record starting position
+  m_lastControlMs = millis();           // Record startup time
+  m_lastMotionMs = m_lastControlMs;     // Initialize motion timestamp
+  m_state = MotorState::STOPPED;        // Ready but not moving
 }
 
+/**
+ * @brief Request calibration to be performed.
+ * Resets all calibration-related state and begins the calibration state machine.
+ * This will interrupt any current operation and start from the beginning.
+ */
 void MotorBase::requestCalibration() {
-  resetController();
-  m_limitsKnown = false;
-  m_state = MotorState::BACKOFF_FROM_LIMIT;
-  m_motionMode = MotionMode::POSITION;
-  m_calStateStartMs = millis();
+  resetController();                           // Clear PID state
+  m_limitsKnown = false;                       // Forget previous limits
+  m_state = MotorState::BACKOFF_FROM_LIMIT;   // Start calibration state machine
+  m_motionMode = MotionMode::POSITION;         // Use position control for calibration
+  m_calStateStartMs = millis();                // Record start time
+  // Reset calibration timing variables
   m_releaseStableStartMs = 0;
   m_centerStableStartMs = 0;
-  m_scanStepActive = false;
+  m_scanStepActive = false;                    // Not scanning stiction yet
   m_scanPwm = 0;
-  m_calFirstHitTick = readTicks();
-  m_microDirection = 0;
-  applyDriverPwm(0);
+  m_calFirstHitTick = readTicks();            // Record position when calibration started
+  m_microDirection = 0;                        // Clear micro-correction state
+  applyDriverPwm(0);                           // Stop motor
   m_lastAppliedDirection = 0;
 }
 
+/**
+ * @brief Command the motor to move to an absolute position.
+ * @param targetTicks The target position in encoder ticks
+ * @return true if command accepted, false if rejected (error state or out of limits)
+ * 
+ * Validates the command, interrupts calibration if necessary, sets the target,
+ * and transitions to appropriate state (READY if already at target, MOVING otherwise).
+ */
 bool MotorBase::commandPositionTicks(long targetTicks) {
   if (isError()) {
-    return false;
+    return false;  // Reject commands if motor is in error state
   }
   if (!targetInsideKnownLimits(targetTicks)) {
-    return false;
+    return false;  // Reject if target is outside calibrated limits
   }
 
   // Allow command-driven interruption of calibration to support per-axis testing.
   if (isCalibrating()) {
-    applyDriverPwm(0);
+    applyDriverPwm(0);        // Stop any calibration movement
     m_lastAppliedDirection = 0;
-    m_scanStepActive = false;
+    m_scanStepActive = false; // Cancel any active stiction scan
   }
 
-  m_targetTicks = targetTicks;
-  m_motionMode = MotionMode::POSITION;
-  resetController();
+  m_targetTicks = targetTicks;      // Set new target position
+  m_motionMode = MotionMode::POSITION;  // Use position control mode
+  resetController();                // Clear PID state for fresh start
 
   if (readTicks() == m_targetTicks) {
+    // Already at target - go to ready state
     m_state = MotorState::READY;
     applyDriverPwm(0);
     m_lastAppliedDirection = 0;
   } else {
+    // Need to move - enter moving state
     m_state = MotorState::MOVING;
   }
   return true;
 }
 
+/**
+ * @brief Default implementation of speed control command (not supported in base class).
+ * @param targetTicks Final target position (unused)
+ * @param ticksPerSecond Desired speed (unused)
+ * @return false - base class doesn't support speed control
+ * 
+ * This is overridden by MD13SMotor which implements speed control.
+ */
 bool MotorBase::commandSpeedTicksPerSecond(long, float) {
-  return false;
+  return false;  // Not supported in base class
 }
 
+/**
+ * @brief Emergency stop - hold current position with maximum PWM.
+ * Sets target to current position and applies maximum holding force.
+ */
 void MotorBase::emergencyStopAndHold() {
-  const long nowPos = readTicks();
-  m_targetTicks = nowPos;
-  m_motionMode = MotionMode::POSITION;
-  m_state = MotorState::READY;
-  resetController();
-  applyDriverPwm(0);
+  const long nowPos = readTicks();     // Get current position
+  m_targetTicks = nowPos;              // Set target to current position
+  m_motionMode = MotionMode::POSITION; // Use position control
+  m_state = MotorState::READY;         // Ready but holding
+  resetController();                   // Clear PID state
+  applyDriverPwm(0);                   // Stop movement (will be overridden by holding logic)
   m_lastAppliedDirection = 0;
 }
 
+/**
+ * @brief Read current encoder position.
+ * @return Current position in encoder ticks
+ */
 long MotorBase::readTicks() const {
   return InterruptHub::readEncoderTicks(m_encoderId);
 }
 
+/**
+ * @brief Force-set the encoder position counter.
+ * @param ticks New position value
+ * 
+ * Used during calibration to zero the encoder at known positions.
+ */
 void MotorBase::writeTicks(long ticks) {
   InterruptHub::writeEncoderTicks(m_encoderId, ticks);
 }
 
+/**
+ * @brief Check if motor is currently in any calibration state.
+ * @return true if calibrating, false otherwise
+ */
 bool MotorBase::isCalibrating() const {
   return m_state == MotorState::BACKOFF_FROM_LIMIT ||
          m_state == MotorState::CALIBRATING_MIN ||
@@ -154,113 +220,171 @@ bool MotorBase::isCalibrating() const {
          m_state == MotorState::CALIB_RETURN_TO_ZERO;
 }
 
+/**
+ * @brief Reset PID controller state.
+ * Clears integral term, previous error, and motion-related variables.
+ */
 void MotorBase::resetController() {
-  m_errorIntegral = 0.0f;
-  m_prevErrorTicks = 0;
-  m_lastAppliedDirection = 0;
-  m_microDirection = 0;
+  m_errorIntegral = 0.0f;      // Clear accumulated integral
+  m_prevErrorTicks = 0;        // Clear derivative history
+  m_lastAppliedDirection = 0;  // Clear direction history
+  m_microDirection = 0;        // Clear micro-correction state
 }
 
+/**
+ * @brief Force the motor to ready state at current position.
+ * Used to recover from errors or calibration interruptions.
+ */
 void MotorBase::forceReadyAtCurrentPosition() {
-  m_targetTicks = readTicks();
-  m_motionMode = MotionMode::POSITION;
-  m_state = MotorState::READY;
-  resetController();
-  applyDriverPwm(0);
+  m_targetTicks = readTicks();          // Set target to current position
+  m_motionMode = MotionMode::POSITION;  // Position control mode
+  m_state = MotorState::READY;          // Ready state
+  resetController();                    // Clear PID state
+  applyDriverPwm(0);                    // Stop motor
   m_lastAppliedDirection = 0;
 }
 
+/**
+ * @brief Get the adaptive stiction floor for a given direction.
+ * @param direction Motor direction (positive or negative)
+ * @return Minimum PWM value required for motion in that direction
+ */
 uint8_t MotorBase::readAdaptiveMinPwmForDir(int8_t direction) const {
   if (direction >= 0) {
-    return m_adaptiveMinPwmPos;
+    return m_adaptiveMinPwmPos;  // Positive direction floor
   }
-  return m_adaptiveMinPwmNeg;
+  return m_adaptiveMinPwmNeg;    // Negative direction floor
 }
 
+/**
+ * @brief Check if movement in a direction is blocked by limit switches.
+ * @param direction Intended direction of movement
+ * @return true if the direction is blocked by a triggered limit switch
+ */
 bool MotorBase::directionBlockedByLimit(int8_t direction) const {
   if (direction == 0) {
-    return false;
+    return false;  // No movement, not blocked
   }
+  // Check if trying to move toward min limit and min switch is triggered
   if (m_limits.hasMinSwitch &&
       direction == m_limits.dirTowardMin &&
       InterruptHub::isSwitchTriggered(m_limits.minSwitch)) {
     return true;
   }
+  // Check if trying to move toward max limit and max switch is triggered
   if (m_limits.hasMaxSwitch &&
       direction == m_limits.dirTowardMax &&
       InterruptHub::isSwitchTriggered(m_limits.maxSwitch)) {
     return true;
   }
-  return false;
+  return false;  // Direction is clear
 }
 
+/**
+ * @brief Check if any configured limit switch is currently triggered.
+ * @return true if any limit switch is active
+ */
 bool MotorBase::anyConfiguredLimitTriggered() const {
   const bool minHit = m_limits.hasMinSwitch && InterruptHub::isSwitchTriggered(m_limits.minSwitch);
   const bool maxHit = m_limits.hasMaxSwitch && InterruptHub::isSwitchTriggered(m_limits.maxSwitch);
   return minHit || maxHit;
 }
 
+/**
+ * @brief Check if target position is within calibrated limits.
+ * @param targetTicks Position to check
+ * @return true if within limits or limits unknown, false if outside known limits
+ */
 bool MotorBase::targetInsideKnownLimits(long targetTicks) const {
   if (!m_limitsKnown) {
-    return true;
+    return true;  // If limits not calibrated, allow any target
   }
   return targetTicks >= m_limitMinTick && targetTicks <= m_limitMaxTick;
 }
 
+/**
+ * @brief Enter error state and stop all motion.
+ * Used when calibration fails or other unrecoverable errors occur.
+ */
 void MotorBase::enterError() {
-  m_state = MotorState::ERROR;
-  m_targetTicks = readTicks();
-  m_motionMode = MotionMode::POSITION;
-  resetController();
-  applyDriverPwm(0);
+  m_state = MotorState::ERROR;          // Set error state
+  m_targetTicks = readTicks();          // Set target to current position
+  m_motionMode = MotionMode::POSITION;  // Position control mode
+  resetController();                    // Clear PID state
+  applyDriverPwm(0);                    // Stop motor
   m_lastAppliedDirection = 0;
 }
 
+/**
+ * @brief Drive motor in open-loop directional control.
+ * @param direction Direction to move (-1, 0, +1)
+ * @param pwmMagnitude PWM value for movement (0-255)
+ * 
+ * Applies PWM in specified direction, but checks for limit switch blocking.
+ * Used during calibration phases.
+ */
 void MotorBase::driveOpenLoopDirectional(int8_t direction, uint8_t pwmMagnitude) {
   if (direction == 0 || pwmMagnitude == 0) {
-    applyDriverPwm(0);
+    applyDriverPwm(0);      // Stop if no direction or no magnitude
     m_lastAppliedDirection = 0;
     return;
   }
   if (directionBlockedByLimit(direction)) {
-    applyDriverPwm(0);
+    applyDriverPwm(0);      // Stop if direction blocked by limit
     m_lastAppliedDirection = 0;
     return;
   }
-  applyDriverPwm(static_cast<int16_t>(direction * pwmMagnitude));
+  applyDriverPwm(static_cast<int16_t>(direction * pwmMagnitude));  // Apply directional PWM
   m_lastAppliedDirection = direction;
 }
 
+/**
+ * @brief Main update function - called regularly (every 5ms) to control motor.
+ * @param nowMs Current timestamp in milliseconds
+ * 
+ * This is the core control loop that:
+ * 1. Enforces safety limits on every call
+ * 2. Runs PID control at specified intervals
+ * 3. Advances calibration state machine if calibrating
+ * 4. Handles motion control and error recovery
+ * 
+ * Must be called frequently but is designed to be non-blocking.
+ */
 void MotorBase::update(unsigned long nowMs) {
-  // Fast safety layer: enforce limit stop on every loop call, not only at PID period cadence.
+  // Fast safety layer: Check limits on every call, not just at control period
+  // This provides immediate response to limit switches
   if (m_lastAppliedDirection != 0 && directionBlockedByLimit(m_lastAppliedDirection)) {
-    applyDriverPwm(0);
+    applyDriverPwm(0);                    // Emergency stop
     m_lastAppliedDirection = 0;
     if (!isCalibrating()) {
-      m_targetTicks = readTicks();
+      m_targetTicks = readTicks();        // Update target to current position
       m_motionMode = MotionMode::POSITION;
-      m_state = MotorState::READY;
+      m_state = MotorState::READY;        // Go to ready state
       resetController();
     }
   }
 
-  const unsigned long elapsedMs = nowMs - m_lastControlMs;  // rollover-safe subtraction
+  // Check if it's time for control update (every controlPeriodMs)
+  const unsigned long elapsedMs = nowMs - m_lastControlMs;  // Safe rollover subtraction
   if (elapsedMs < m_runtime.controlPeriodMs) {
-    return;
+    return;  // Not time yet, exit early
   }
-  m_lastControlMs = nowMs;
-  const float dtSeconds = (elapsedMs > 0) ? (elapsedMs * 0.001f) : 0.001f;
+  m_lastControlMs = nowMs;  // Update last control time
+  const float dtSeconds = (elapsedMs > 0) ? (elapsedMs * 0.001f) : 0.001f;  // Convert to seconds
 
+  // Handle calibration state machine
   if (isCalibrating()) {
     updateCalibration(nowMs);
     return;
   }
+
+  // Handle non-active states
   if (m_state == MotorState::UNINITIALIZED || m_state == MotorState::ERROR || m_state == MotorState::STOPPED) {
-    applyDriverPwm(0);
-    m_lastAppliedDirection = 0;
+    applyDriverPwm(0);  // Ensure motor is stopped
     return;
   }
 
+  // Active motion control
   updateMotion(nowMs, dtSeconds);
 }
 
@@ -747,44 +871,81 @@ void MotorBase::updateStictionScan(unsigned long nowMs, int8_t direction) {
   startNextStictionStep(nowMs, direction);
 }
 
+/**
+ * @brief Compute PID control output for position control.
+ * @param errorTicks Position error (target - current)
+ * @param dtSeconds Time delta since last update
+ * @param currentTicks Current encoder position (unused in base implementation)
+ * @param nowMs Current timestamp (unused in base implementation)
+ * @return Signed PWM value (-255 to +255) to apply to motor
+ * 
+ * Implements standard PID control with:
+ * - Proportional term: responds to current error
+ * - Integral term: responds to accumulated error over time
+ * - Derivative term: responds to rate of error change
+ * - Feed-forward stiction compensation
+ * - Anti-windup on integral term
+ * - Output clamping to PWM limits
+ */
 int16_t MotorBase::computeControlPwm(long errorTicks,
                                      float dtSeconds,
                                      long,
                                      unsigned long) {
   if (errorTicks == 0) {
-    return 0;
+    return 0;  // No error, no output
   }
 
   const float error = static_cast<float>(errorTicks);
+  
+  // Calculate derivative term (rate of error change)
   const float derivative = (error - static_cast<float>(m_prevErrorTicks)) / dtSeconds;
+  
+  // Accumulate integral term
   m_errorIntegral += error * dtSeconds;
+  
+  // Anti-windup: clamp integral to prevent runaway
   if (m_errorIntegral > m_pid.integralMax) m_errorIntegral = m_pid.integralMax;
   if (m_errorIntegral < m_pid.integralMin) m_errorIntegral = m_pid.integralMin;
 
-  const float pidOut = (m_pid.kp * error) +
-                       (m_pid.ki * m_errorIntegral) +
-                       (m_pid.kd * derivative);
+  // Compute PID output
+  const float pidOut = (m_pid.kp * error) +                    // Proportional
+                       (m_pid.ki * m_errorIntegral) +          // Integral
+                       (m_pid.kd * derivative);                // Derivative
 
+  // Determine movement direction
   const int8_t direction = signOf(errorTicks);
+  
+  // Add feed-forward stiction compensation
   const int16_t ff = static_cast<int16_t>(readAdaptiveMinPwmForDir(direction));
   int32_t pwm = static_cast<int32_t>(lroundf(pidOut)) + (direction * ff);
 
-  // Immediate stiction compensation: any non-zero error gets at least calibrated minimum PWM.
+  // Ensure minimum PWM for stiction compensation (immediate correction)
   if (direction > 0 && pwm < ff) pwm = ff;
   if (direction < 0 && pwm > -ff) pwm = -ff;
 
+  // Clamp to maximum PWM limits
   if (pwm > m_runtime.pwmMax) pwm = m_runtime.pwmMax;
   if (pwm < -m_runtime.pwmMax) pwm = -m_runtime.pwmMax;
   return static_cast<int16_t>(pwm);
 }
 
+/**
+ * @brief Begin micro-correction sequence for precision positioning.
+ * @param nowMs Current timestamp
+ * @param currentErrorTicks Current position error
+ * 
+ * Initiates precision positioning when motor overshoots target.
+ * Applies reverse kick to absorb momentum, then holds with stiction floor.
+ * Also reduces adaptive stiction floor as feedback that current floor is too high.
+ */
 void MotorBase::beginMicroCorrection(unsigned long nowMs, long currentErrorTicks) {
-  m_state = MotorState::MICRO_CORRECTION;
-  m_microStartMs = nowMs;
-  m_microDirection = signOf(currentErrorTicks);
-  m_errorIntegral = 0.0f;
+  m_state = MotorState::MICRO_CORRECTION;    // Enter micro-correction state
+  m_microStartMs = nowMs;                     // Record start time
+  m_microDirection = signOf(currentErrorTicks); // Direction of error
+  m_errorIntegral = 0.0f;                     // Reset PID integral
 
-  // Overshoot feedback: reduce the adaptive floor in the just-used direction.
+  // Adaptive learning: reduce stiction floor since we overshot
+  // This indicates the current floor is too high for precise control
   if (m_lastAppliedDirection > 0 && m_adaptiveMinPwmPos > m_stictionMinPwmPos) {
     const uint8_t drop = m_precision.adaptiveDropStep;
     const uint8_t floor = m_stictionMinPwmPos;
@@ -907,42 +1068,59 @@ void MotorBase::updateMicroCorrection(unsigned long nowMs, long currentErrorTick
   }
 }
 
+/**
+ * @brief Update motion control using PID algorithm.
+ * @param nowMs Current timestamp
+ * @param dtSeconds Time delta since last control update
+ * 
+ * This method implements the core motion control logic:
+ * 1. Calculate position error (target - current)
+ * 2. Handle micro-correction for precision positioning
+ * 3. Check if target reached
+ * 4. Detect overshoot for micro-correction triggering
+ * 5. Compute PID PWM output
+ * 6. Apply PWM with safety checks
+ * 7. Update motor state
+ */
 void MotorBase::updateMotion(unsigned long nowMs, float dtSeconds) {
-  const long currentTicks = readTicks();
-  const long errorTicks = m_targetTicks - currentTicks;
+  const long currentTicks = readTicks();              // Get current encoder position
+  const long errorTicks = m_targetTicks - currentTicks; // Calculate position error
 
+  // Handle micro-correction state (precision positioning)
   if (m_state == MotorState::MICRO_CORRECTION) {
     updateMicroCorrection(nowMs, errorTicks, currentTicks);
     m_prevErrorTicks = errorTicks;
     return;
   }
 
+  // Check if target reached
   if (errorTicks == 0) {
-    applyCommandedPwm(0, nowMs, currentTicks, errorTicks);
-    m_state = MotorState::READY;
+    applyCommandedPwm(0, nowMs, currentTicks, errorTicks);  // Stop motor
+    m_state = MotorState::READY;                             // Go to ready state
     m_prevErrorTicks = 0;
     return;
   }
 
-  // 1-tick precision path:
-  // if error sign flips around the target, we switch to MICRO_CORRECTION and
-  // apply a short reverse kick plus stiction floor hold until exact tick lock.
+  // Precision positioning: detect overshoot and trigger micro-correction
+  // If error sign changed (overshot target) and within precision window, start micro-correction
   if (m_prevErrorTicks != 0 &&
       signOf(errorTicks) != signOf(m_prevErrorTicks) &&
       absLong(errorTicks) <= m_precision.overshootWindowTicks) {
-    beginMicroCorrection(nowMs, errorTicks);
+    beginMicroCorrection(nowMs, errorTicks);                 // Start micro-correction
     updateMicroCorrection(nowMs, errorTicks, currentTicks);
     m_prevErrorTicks = errorTicks;
     return;
   }
 
+  // Standard PID control
   int16_t pwm = computeControlPwm(errorTicks, dtSeconds, currentTicks, nowMs);
   applyCommandedPwm(pwm, nowMs, currentTicks, errorTicks);
 
+  // Update state based on motion mode
   if (m_state != MotorState::ERROR && m_state != MotorState::READY) {
     m_state = (m_motionMode == MotionMode::SPEED) ? MotorState::SPEED_MOVING : MotorState::MOVING;
   }
-  m_prevErrorTicks = errorTicks;
+  m_prevErrorTicks = errorTicks;  // Store for next iteration's overshoot detection
 }
 
 }  // namespace refactored

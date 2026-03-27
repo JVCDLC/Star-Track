@@ -8,26 +8,26 @@
 namespace refactored {
 
 enum class MotorState : uint8_t {
-  UNINITIALIZED = 0,
-  BACKOFF_FROM_LIMIT,
-  CALIBRATING_MIN,
-  BACKOFF_AFTER_MIN,
-  CALIBRATING_MIN_VERIFY,
-  BACKOFF_AFTER_MIN_VERIFY,
-  CALIBRATING_MAX,
-  BACKOFF_AFTER_MAX,
-  CALIBRATING_MAX_VERIFY,
-  BACKOFF_AFTER_MAX_VERIFY,
-  CENTERING,
-  STICTION_SCAN_POS,
-  STICTION_SCAN_NEG,
-  CALIB_RETURN_TO_ZERO,
-  READY,
-  MOVING,
-  SPEED_MOVING,
-  MICRO_CORRECTION,
-  STOPPED,
-  ERROR
+  UNINITIALIZED = 0,          ///< Initial state before begin() is called
+  BACKOFF_FROM_LIMIT,        ///< Moving away from a limit switch that was triggered at startup
+  CALIBRATING_MIN,            ///< Fast seeking toward minimum limit switch
+  BACKOFF_AFTER_MIN,          ///< Backing off after hitting minimum limit
+  CALIBRATING_MIN_VERIFY,     ///< Slow verification pass for minimum limit
+  BACKOFF_AFTER_MIN_VERIFY,   ///< Backing off after verification of minimum limit
+  CALIBRATING_MAX,            ///< Fast seeking toward maximum limit switch
+  BACKOFF_AFTER_MAX,          ///< Backing off after hitting maximum limit
+  CALIBRATING_MAX_VERIFY,     ///< Slow verification pass for maximum limit
+  BACKOFF_AFTER_MAX_VERIFY,   ///< Backing off after verification of maximum limit
+  CENTERING,                  ///< Moving to geometric center between limits
+  STICTION_SCAN_POS,          ///< Scanning for minimum PWM needed for positive direction motion
+  STICTION_SCAN_NEG,          ///< Scanning for minimum PWM needed for negative direction motion
+  CALIB_RETURN_TO_ZERO,       ///< Returning to logical zero position after calibration
+  READY,                      ///< Ready for commands, at rest
+  MOVING,                     ///< Executing position control command
+  SPEED_MOVING,               ///< Executing speed control command (focus only)
+  MICRO_CORRECTION,           ///< Fine-tuning position after overshoot
+  STOPPED,                    ///< Stopped but not at target (emergency stop)
+  ERROR                       ///< Error state (calibration failed, timeout, etc.)
 };
 
 enum class MotionMode : uint8_t {
@@ -39,71 +39,84 @@ struct PidConfig {
   float kp;
   float ki;
   float kd;
-  float integralMin;
-  float integralMax;
+  float integralMin;  ///< Minimum allowed integral term (anti-windup)
+  float integralMax;  ///< Maximum allowed integral term (anti-windup)
 };
 
 struct MotorRuntimeConfig {
-  int16_t pwmMax;
-  uint16_t controlPeriodMs;
-  uint16_t noMotionTimeoutMs;
-  uint8_t atTargetToleranceTicks;
+  int16_t pwmMax;                ///< Maximum PWM value (0-255 for Arduino PWM)
+  uint16_t controlPeriodMs;      ///< How often to run the control loop (in ms)
+  uint16_t noMotionTimeoutMs;    ///< Timeout before considering motor stuck
+  uint8_t atTargetToleranceTicks; ///< Position tolerance for considering target reached
 };
 
 struct LimitConfig {
-  bool hasMinSwitch;
-  SwitchId minSwitch;
-  int8_t dirTowardMin;  // +1 or -1 in motor command sign convention
+  bool hasMinSwitch;     ///< Whether minimum limit switch is configured
+  SwitchId minSwitch;    ///< Which switch ID is the minimum limit
+  int8_t dirTowardMin;   ///< Motor direction (+1/-1) that moves toward minimum limit
 
-  bool hasMaxSwitch;
-  SwitchId maxSwitch;
-  int8_t dirTowardMax;  // +1 or -1 in motor command sign convention
+  bool hasMaxSwitch;     ///< Whether maximum limit switch is configured
+  SwitchId maxSwitch;    ///< Which switch ID is the maximum limit
+  int8_t dirTowardMax;   ///< Motor direction (+1/-1) that moves toward maximum limit
 
-  long fallbackSpanTicks;
+  long fallbackSpanTicks; ///< Fallback range if switches fail (used for safety)
 };
 
 struct CalibrationConfig {
-  uint8_t fastSeekPwm;
-  uint8_t verifySeekPwm;
-  uint8_t backoffPwm;
-  uint16_t backoffDurationMs;
-  uint16_t releaseStableMs;
-  uint8_t verifyDeltaToleranceTicks;
-  bool singleSwitchHomeOnly;
-  uint8_t centerToleranceTicks;
-  uint16_t centerSettleMs;
+  uint8_t fastSeekPwm;           ///< PWM for fast seeking to limits (high speed)
+  uint8_t verifySeekPwm;         ///< PWM for slow verification pass (precision)
+  uint8_t backoffPwm;            ///< PWM for backing off from switches
+  uint16_t backoffDurationMs;    ///< How long to back off after hitting switch
+  uint16_t releaseStableMs;      ///< Time to wait for switch to stabilize after release
+  uint8_t verifyDeltaToleranceTicks; ///< Position tolerance for verification passes
+  bool singleSwitchHomeOnly;     ///< True for focus (only min switch), false for RA/DEC
+  uint8_t centerToleranceTicks;  ///< Position tolerance for centering
+  uint16_t centerSettleMs;       ///< Time to settle at center before declaring done
 
-  uint8_t stictionScanStartPwm;
-  uint8_t stictionScanStepPwm;
-  uint8_t stictionScanMaxPwm;
-  uint16_t stictionSampleWindowMs;
-  uint8_t stictionDetectTicks;
+  uint8_t stictionScanStartPwm;  ///< Starting PWM for stiction binary search
+  uint8_t stictionScanStepPwm;   ///< PWM increment for stiction scanning
+  uint8_t stictionScanMaxPwm;    ///< Maximum PWM to try in stiction scan
+  uint16_t stictionSampleWindowMs; ///< Time to sample motion at each PWM level
+  uint8_t stictionDetectTicks;   ///< Minimum ticks of motion to detect as "moving"
 };
 
 struct PrecisionConfig {
-  uint8_t overshootWindowTicks;
-  uint16_t reverseKickMs;
-  uint8_t reverseKickExtraPwm;
-  uint16_t adaptiveRaiseDelayMs;
-  uint8_t adaptiveRaiseStep;
-  uint8_t adaptiveDropStep;
+  uint8_t overshootWindowTicks;    ///< Error window for triggering micro-correction
+  uint16_t reverseKickMs;          ///< Duration of reverse kick in micro-correction
+  uint8_t reverseKickExtraPwm;     ///< Extra PWM added during reverse kick
+  uint16_t adaptiveRaiseDelayMs;   ///< Delay before raising stiction floor when stuck
+  uint8_t adaptiveRaiseStep;       ///< How much to increase stiction floor
+  uint8_t adaptiveDropStep;        ///< How much to decrease stiction floor when overshooting
 };
 
+/**
+ * @brief Abstract base class for motor control.
+ * 
+ * This class implements the core motor control logic including:
+ * - PID-based position control
+ * - Multi-pass limit switch calibration
+ * - Stiction compensation and adaptive floor adjustment
+ * - Micro-correction for precision positioning
+ * - Safety timeouts and error handling
+ * 
+ * Derived classes (BTS7960Motor, MD13SMotor) implement hardware-specific driver control.
+ * 
+ * Key design principles:
+ * - Non-blocking: update() must be called frequently but returns quickly
+ * - State machine: Complex operations (calibration) use non-blocking state progression
+ * - Safety first: Multiple layers of limit checking and timeout protection
+ */
 class MotorBase {
  public:
-  // Core contract:
-  // - All control uses encoder ticks only (no degree conversion in runtime loop).
-  // - update() is strictly non-blocking and must be called at high frequency.
-  // - each motor owns its own PID, limits, calibration flow and safety timers.
-  MotorBase(const char* name,
-            MotorId encoderId,
-            const PidConfig& pid,
-            const MotorRuntimeConfig& runtime,
-            const LimitConfig& limits,
-            const CalibrationConfig& calibration,
-            const PrecisionConfig& precision);
+  MotorBase(const char* name,                     // Motor name
+            MotorId encoderId,                    // Which encoder this motor reads from
+            const PidConfig& pid,                 // PID configuration for position control
+            const MotorRuntimeConfig& runtime,    // Runtime parameters (PWM limits, control period, timeouts)
+            const LimitConfig& limits,            // Limit switch configuration
+            const CalibrationConfig& calibration, // Calibration procedure parameters (speeds, timings, tolerances)
+            const PrecisionConfig& precision);    // Precision control parameters (overshoot handling, adaptive stiction)
 
-  virtual ~MotorBase() {}
+  virtual ~MotorBase() {} // Virtual destructor for base class
 
   void begin();
   void update(unsigned long nowMs);
@@ -125,6 +138,8 @@ class MotorBase {
   MotorState readState() const { return m_state; }
   const char* readName() const { return m_name; }
   bool isReady() const { return m_state == MotorState::READY; }
+
+  void debugApplyPwm(int16_t pwm) { applyDriverPwm(pwm); }
   bool isError() const { return m_state == MotorState::ERROR; }
   bool isCalibrating() const;
 

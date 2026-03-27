@@ -11,7 +11,7 @@ namespace {
 static const bool kDebugLogsEnabled = true;
 static const unsigned long kDebugPeriodMs = 6000;
 
-PidConfig buildDecPid() {
+PidConfig buildDecPid() { // PID config tuned for DEC axis
   PidConfig cfg;
   cfg.kp = 0.21f;
   cfg.ki = 0.00021f;
@@ -21,7 +21,7 @@ PidConfig buildDecPid() {
   return cfg;
 }
 
-PidConfig buildRaPid() {
+PidConfig buildRaPid() { // PID configu tuned for RA axis
   PidConfig cfg;
   cfg.kp = 0.16f;
   cfg.ki = 0.00008f;
@@ -31,7 +31,7 @@ PidConfig buildRaPid() {
   return cfg;
 }
 
-PidConfig buildFocusPositionPid() {
+PidConfig buildFocusPositionPid() { // PID config tuned for focus position control (used in both position and speed modes)
   PidConfig cfg;
   cfg.kp = 0.10f;
   cfg.ki = 0.05f;
@@ -41,20 +41,20 @@ PidConfig buildFocusPositionPid() {
   return cfg;
 }
 
-SpeedPidConfig buildFocusSpeedPid() {
+SpeedPidConfig buildFocusSpeedPid() { // PID config tuned for focus speed control
   SpeedPidConfig cfg;
   cfg.kp = 2.8f;
   cfg.ki = 0.25f;
   cfg.kd = 0.04f;
   cfg.integralMin = -400.0f;
   cfg.integralMax = 400.0f;
-  cfg.positionAssistKp = 0.8f;
-  cfg.slowdownWindowTicks = 30;
-  cfg.minSpeedTicksPerSec = 0.8f;
+  cfg.positionAssistKp = 0.8f;    // Additional position error correction term to help maintain accuracy at low speeds
+  cfg.slowdownWindowTicks = 30;   // Start slowing down when within 30 ticks of target to prevent overshoot
+  cfg.minSpeedTicksPerSec = 0.8f; // Minimum speed to maintain when close to target (helps overcome stiction)
   return cfg;
 }
 
-MotorRuntimeConfig buildRuntimeCommon() {
+MotorRuntimeConfig buildRuntimeCommon() { // Common runtime config for all motors (RA, DEC, Focus)
   MotorRuntimeConfig cfg;
   cfg.pwmMax = 255;
   cfg.controlPeriodMs = 5;
@@ -87,7 +87,7 @@ CalibrationConfig buildCalibrationFast() {
 CalibrationConfig buildCalibrationFocus() {
   CalibrationConfig cfg;
   // Focus: single-switch homing only.
-  // After homing to SW1, the controller waits in READY for higher-level commands.
+  // After homing to SW1, the controller waits in READY for the pi to send the calibration command for autofocus.
   cfg.fastSeekPwm = 150;
   cfg.verifySeekPwm = 65;
   cfg.backoffPwm = 65;
@@ -105,7 +105,7 @@ CalibrationConfig buildCalibrationFocus() {
   return cfg;
 }
 
-PrecisionConfig buildPrecisionCommon() {
+PrecisionConfig buildPrecisionCommon() { // Common precision config for all motors (RA, DEC, Focus)
   PrecisionConfig cfg;
   cfg.overshootWindowTicks = 1;
   cfg.reverseKickMs = 20;
@@ -116,13 +116,13 @@ PrecisionConfig buildPrecisionCommon() {
   return cfg;
 }
 
-bool isMotorMovingState(MotorState state) {
+bool isMotorMovingState(MotorState state) { // Helper to determine if a motor state represents active movement
   return state == MotorState::MOVING ||
          state == MotorState::SPEED_MOVING ||
          state == MotorState::MICRO_CORRECTION;
 }
 
-const char* motorStateText(MotorState state) {
+const char* motorStateText(MotorState state) { // Helper to convert motor state to human-readable string for debugging
   switch (state) {
     case MotorState::UNINITIALIZED: return "UNINITIALIZED";
     case MotorState::BACKOFF_FROM_LIMIT: return "BACKOFF_FROM_LIMIT";
@@ -148,7 +148,7 @@ const char* motorStateText(MotorState state) {
   }
 }
 
-const char* mountStateText(MountState state) {
+const char* mountStateText(MountState state) { // Helper to convert mount state to human-readable string for debugging
   switch (state) {
     case MountState::UNINITIALIZED: return "UNINITIALIZED";
     case MountState::CALIBRATING: return "CALIBRATING";
@@ -161,23 +161,22 @@ const char* mountStateText(MountState state) {
 
 }  // namespace
 
-MountController::MountController()
-    : m_serial(),
-      m_motorDec("DEC",
-                 MotorId::AXIS_DEC,
-                 Bts7960Pins{pins::DEC_RPWM, pins::DEC_LPWM, pins::DEC_REN, pins::DEC_LEN},
+MountController::MountController() // Constructor initializes motors and state
+    : m_serial(), // Serial protocol handler
+      m_motorDec("DEC", // DEC motor configuration
+                 MotorId::AXIS_DEC,   // Reads from DEC encoder
+                 Bts7960Pins{pins::DEC_RPWM, pins::DEC_LPWM, pins::DEC_REN, pins::DEC_LEN},   // 
                  buildDecPid(),
                  buildRuntimeCommon(),
                  LimitConfig{
-                     // DEC hardware mapping (user-verified):
+                     // DEC hardware mapping:
                      // - SW1: one end-stop
                      // - SW4: opposite end-stop
                      //
-                     // Direction signs are kept aligned with the old behavior:
                      // +1 blocks travel toward the SW4 side, -1 blocks toward the SW1 side.
-                     true,  SwitchId::SW4, +1,
-                     true,  SwitchId::SW1, -1,
-                     42000},
+                     true,  SwitchId::SW4, +1,  // VERT
+                     true,  SwitchId::SW5, -1, // JAUNE
+                     43000}, // Fallback span if no switches: 43000 ticks
                  buildCalibrationFast(),
                  buildPrecisionCommon()),
       m_motorRa("RA",
@@ -186,9 +185,9 @@ MountController::MountController()
                 buildRaPid(),
                 buildRuntimeCommon(),
                 LimitConfig{
-                    true,  SwitchId::SW3, -1,
-                    true,  SwitchId::SW2, +1,
-                    65000},
+                    true,  SwitchId::SW3, -1, // ORANGE
+                    true,  SwitchId::SW2, +1, // BLEU
+                    600000},
                 buildCalibrationFast(),
                 buildPrecisionCommon()),
       m_motorFoc("FOC",
@@ -199,9 +198,9 @@ MountController::MountController()
                  buildRuntimeCommon(),
                  LimitConfig{
                      // Keep focus on a dedicated single home switch (no shared DEC switch).
-                     true,   SwitchId::SW6, -1,
-                     false,  SwitchId::SW6, +1,
-                     3500},
+                     true,   SwitchId::SW1, -1, // MAUVE
+                     false,  SwitchId::SW1, +1,
+                     10000},
                  buildCalibrationFocus(),
                  buildPrecisionCommon()),
       m_state(MountState::UNINITIALIZED),
@@ -210,24 +209,27 @@ MountController::MountController()
       m_lastPrintedRaState(MotorState::UNINITIALIZED),
       m_lastPrintedDecState(MotorState::UNINITIALIZED),
       m_lastPrintedFocState(MotorState::UNINITIALIZED),
-      m_selfTest{false, NULL, 0, 0, 0, 0} {}
+      m_selfTest{false, NULL, 0, 0, 0, 0},
+      m_debugFocusActive(false),
+      m_debugStartMs(0),
+      m_lastDebugPrintMs(0) {}
 
-void MountController::begin() {
-  // Silent PWM setup copied from current project behavior.
+void MountController::begin() { // Initializes hardware and starts calibration
+  // Silent PWM setup
   TCCR4B = (TCCR4B & 0b11111000) | 0x01;
   TCCR1B = (TCCR1B & 0b11111000) | 0x01;
   TCCR5B = (TCCR5B & 0b11111000) | 0x01;
   TCCR2B = (TCCR2B & 0b11111000) | 0x01;
-
+  // Serial setup
   Serial.begin(115200);
   delay(150);
-
+  // Interrupts and motor initialization
   InterruptHub::begin();
   m_motorDec.begin();
   m_motorRa.begin();
   m_motorFoc.begin();
 
-  if (kDebugLogsEnabled) {
+  if (kDebugLogsEnabled) { // Print initial switch states for debugging
     Serial.print(F("DBG,BOOT,sw=0x"));
     Serial.println(InterruptHub::readSwitchBitmap(), HEX);
     Serial.print(F("DBG,BOOT,SW1="));
@@ -242,7 +244,7 @@ void MountController::begin() {
     Serial.println(InterruptHub::isSwitchTriggered(SwitchId::SW5));
   }
 
-  startParallelCalibration();
+  // startParallelCalibration(); // Automatically start calibration of all motors on boot. The mount will remain in CALIBRATING state until all motors report READY.
 }
 
 MotorBase* MountController::selectMotor(MotorSelector selector) {
@@ -377,6 +379,13 @@ bool MountController::processCommand(const SerialCommand& cmd) {
 
     case CommandAction::MOTION_SELF_TEST:
       return startMotionSelfTest(cmd.motor, cmd.auxTicks);
+
+    case CommandAction::DEBUG_FOCUS:
+      if (cmd.motor != MotorSelector::MOTOR_FOC) return false;
+      m_debugFocusActive = true;
+      m_debugStartMs = millis();
+      m_lastDebugPrintMs = 0;
+      return true;
 
     case CommandAction::INVALID:
     default:
@@ -522,6 +531,21 @@ void MountController::update() {
   updateMotionSelfTest(nowMs);
   updateMountState();
   emitDebug(nowMs);
+
+  // Handle focus debug mode
+  if (m_debugFocusActive) {
+    m_motorFoc.debugApplyPwm(50);  // Apply PWM to one side (positive direction)
+    if (nowMs - m_lastDebugPrintMs >= 500) {  // Print encoder every 500ms
+      Serial.print(F("DBG,FOCUS_DEBUG,encoder="));
+      Serial.println(m_motorFoc.readTicks());
+      m_lastDebugPrintMs = nowMs;
+    }
+    if (nowMs - m_debugStartMs >= 2000) {  // Stop after 2 seconds
+      m_motorFoc.debugApplyPwm(0);
+      m_debugFocusActive = false;
+      Serial.println(F("DBG,FOCUS_DEBUG,DONE"));
+    }
+  }
 }
 
 }  // namespace refactored

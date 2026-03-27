@@ -46,6 +46,15 @@ void test_parse_motion_self_test() {
   TEST_ASSERT_EQUAL(1200, cmd.auxTicks);
 }
 
+void test_parse_debug_focus() {
+  SerialProtocol parser;
+  SerialCommand cmd;
+  char line[] = "6,FOC";
+  TEST_ASSERT_TRUE(parser.parseFromCString(line, cmd));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CommandAction::DEBUG_FOCUS), static_cast<uint8_t>(cmd.action));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MotorSelector::MOTOR_FOC), static_cast<uint8_t>(cmd.motor));
+}
+
 #else
 void test_refactored_not_enabled() {
   TEST_PASS();
@@ -60,6 +69,7 @@ void setup() {
   RUN_TEST(test_parse_focus_speed_move);
   RUN_TEST(test_parse_single_motor_calibration);
   RUN_TEST(test_parse_motion_self_test);
+  RUN_TEST(test_parse_debug_focus);
 #else
   RUN_TEST(test_refactored_not_enabled);
 #endif
