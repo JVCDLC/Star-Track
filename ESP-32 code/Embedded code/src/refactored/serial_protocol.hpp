@@ -17,7 +17,17 @@ enum class CommandAction : uint8_t {
   CALIBRATE_ONE = 4,     ///< Start calibration for a specific motor
   MOTION_SELF_TEST = 5,  ///< Run a self-test motion for a motor
   DEBUG_FOCUS = 6,       ///< Debug focus motor: apply PWM and monitor encoder
+  SET_PID = 7,           ///< Update PID gains at runtime for a specific motor and PID loop
   INVALID = 255          ///< Invalid or unrecognized command
+};
+
+/**
+ * @brief PID loop selector for runtime tuning command.
+ */
+enum class PidSelector : uint8_t {
+  NONE = 0,
+  POSITION,  ///< Position PID (RA/DEC/FOC)
+  SPEED      ///< Speed PID (FOC only)
 };
 
 /**
@@ -41,6 +51,10 @@ struct SerialCommand {
   long targetTicks;               ///< Target position in encoder ticks (for move commands)
   float speedTicksPerSecond;      ///< Speed in ticks per second (for speed moves, focus only)
   long auxTicks;                  ///< Auxiliary ticks value (used for self-test delta)
+  PidSelector pidSelector;        ///< PID loop selector for SET_PID command
+  float pidKp;                    ///< New proportional gain
+  float pidKi;                    ///< New integral gain
+  float pidKd;                    ///< New derivative gain
 };
 
 /**
@@ -96,6 +110,7 @@ class SerialProtocol {
    * @return The corresponding MotorSelector enum value.
    */
   static MotorSelector parseMotorToken(char* token);
+  static PidSelector parsePidToken(char* token);
 
   static const uint8_t kBufferSize = 96;  ///< Size of the internal buffer for incoming data
   char m_buffer[kBufferSize];             ///< Buffer for accumulating incoming serial data

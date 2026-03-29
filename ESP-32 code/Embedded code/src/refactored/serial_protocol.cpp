@@ -82,6 +82,25 @@ MotorSelector SerialProtocol::parseMotorToken(char* token) {
 }
 
 /**
+ * @brief Parse PID selector token into corresponding enum.
+ * @param token PID selector string (e.g., "POS", "POSITION", "SPD", "SPEED")
+ * @return Parsed PidSelector, or NONE if unknown.
+ */
+PidSelector SerialProtocol::parsePidToken(char* token) {
+  if (token == NULL) return PidSelector::NONE;
+  trimToken(token);
+  toUpperInPlace(token);
+
+  if (strcmp(token, "POS") == 0 || strcmp(token, "POSITION") == 0) {
+    return PidSelector::POSITION;
+  }
+  if (strcmp(token, "SPD") == 0 || strcmp(token, "SPEED") == 0) {
+    return PidSelector::SPEED;
+  }
+  return PidSelector::NONE;
+}
+
+/**
  * @brief Parse a serial command from a null-terminated C-string.
  * @param line The input string containing the command (modified during parsing).
  * @param outCommand Output structure filled with parsed command data.
@@ -101,6 +120,10 @@ bool SerialProtocol::parseFromCString(char* line, SerialCommand& outCommand) {
   outCommand.targetTicks = 0;
   outCommand.speedTicksPerSecond = 0.0f;
   outCommand.auxTicks = 0;
+  outCommand.pidSelector = PidSelector::NONE;
+  outCommand.pidKp = 0.0f;
+  outCommand.pidKi = 0.0f;
+  outCommand.pidKd = 0.0f;
 
   // Get first token (action or legacy keyword)
   char* first = strtok(line, ",");
@@ -143,6 +166,7 @@ bool SerialProtocol::parseFromCString(char* line, SerialCommand& outCommand) {
   // 3                              # CALIBRATE_ALL
   // 4,<MOTOR>                      # CALIBRATE_ONE
   // 5,<MOTOR>[,DELTA_TICKS]        # MOTION_SELF_TEST
+  // 7,<MOTOR>,<POS|SPD>,<KP>,<KI>,<KD>  # SET_PID
   char* endPtr = NULL;
   const long actionValue = strtol(first, &endPtr, 10);
   if (endPtr == first) return false;  // Not a valid number
@@ -175,6 +199,41 @@ bool SerialProtocol::parseFromCString(char* line, SerialCommand& outCommand) {
       if (deltaEnd == deltaToken) return false;
       outCommand.auxTicks = delta;
     }
+    return true;
+  }
+
+  // Runtime PID tuning:
+  // 7,<MOTOR>,<POS|SPD>,<KP>,<KI>,<KD>
+  if (actionValue == static_cast<long>(CommandAction::SET_PID)) {
+    char* motorToken = strtok(NULL, ",");
+    char* pidToken = strtok(NULL, ",");
+    char* kpToken = strtok(NULL, ",");
+    char* kiToken = strtok(NULL, ",");
+    char* kdToken = strtok(NULL, ",");
+    if (motorToken == NULL || pidToken == NULL || kpToken == NULL || kiToken == NULL || kdToken == NULL) {
+      return false;
+    }
+
+    MotorSelector motor = parseMotorToken(motorToken);
+    if (motor == MotorSelector::NONE) return false;
+
+    PidSelector pidSelector = parsePidToken(pidToken);
+    if (pidSelector == PidSelector::NONE) return false;
+
+    char* kpEnd = NULL;
+    char* kiEnd = NULL;
+    char* kdEnd = NULL;
+    const float kp = static_cast<float>(strtod(kpToken, &kpEnd));
+    const float ki = static_cast<float>(strtod(kiToken, &kiEnd));
+    const float kd = static_cast<float>(strtod(kdToken, &kdEnd));
+    if (kpEnd == kpToken || kiEnd == kiToken || kdEnd == kdToken) return false;
+
+    outCommand.action = CommandAction::SET_PID;
+    outCommand.motor = motor;
+    outCommand.pidSelector = pidSelector;
+    outCommand.pidKp = kp;
+    outCommand.pidKi = ki;
+    outCommand.pidKd = kd;
     return true;
   }
 

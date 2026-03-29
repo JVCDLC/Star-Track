@@ -37,6 +37,8 @@ struct SpeedPidConfig {
   float positionAssistKp;    ///< Gain for position-assist term (keeps motor tracking profile)
   uint8_t slowdownWindowTicks; ///< Distance from target to start slowing down (ticks)
   float minSpeedTicksPerSec; ///< Minimum speed to prevent stiction
+  uint8_t snapWindowTicks;   ///< Distance where control switches to position PID for precise lock
+  uint16_t speedLogSamplePeriodMs; ///< Sampling period for speed trace log
 };
 
 /**
@@ -94,6 +96,7 @@ class MD13SMotor : public MotorBase {
    * - commandSpeedTicksPerSecond(2000, 100.0) moves to tick 2000 at 100 ticks/sec
    */
   bool commandSpeedTicksPerSecond(long targetTicks, float ticksPerSecond) override;
+  bool setSpeedPidGains(float kp, float ki, float kd);
 
  protected:
   /**
@@ -133,6 +136,7 @@ class MD13SMotor : public MotorBase {
                             float dtSeconds,
                             long currentTicks,
                             unsigned long nowMs) override;
+  void onTargetReached(unsigned long nowMs, long currentTicks) override;
 
  private:
   Md13sPins m_pins;                      ///< Pin configuration
@@ -142,8 +146,24 @@ class MD13SMotor : public MotorBase {
   float m_requestedSpeedTicksPerSec;    ///< Target speed from command
   float m_speedIntegral;                ///< Speed PID integral accumulator
   float m_prevSpeedError;               ///< Previous speed error (for derivative)
+  float m_filteredActualSpeed;          ///< Low-pass filtered measured speed for stable control
   float m_profileTick;                  ///< Virtual position on linear speed profile
   long m_prevSpeedTick;                 ///< Position from previous cycle (for velocity calc)
+
+  struct SpeedLogSample {
+    uint16_t tMs;                ///< Elapsed time since speed move start (ms)
+    int16_t desiredTicksPerSec;  ///< Desired speed sample (ticks/sec)
+    int16_t actualTicksPerSec;   ///< Measured speed sample (ticks/sec)
+  };
+  static const uint16_t kSpeedLogCapacity = 192;
+  SpeedLogSample m_speedLog[kSpeedLogCapacity];
+  uint16_t m_speedLogCount;
+  bool m_speedLogActive;
+  unsigned long m_speedLogStartMs;
+  unsigned long m_speedLogLastSampleMs;
+  void resetSpeedLog(unsigned long nowMs);
+  void maybeAppendSpeedLog(unsigned long nowMs, float desiredTicksPerSec, float actualTicksPerSec);
+  void dumpSpeedLog(unsigned long nowMs, long finalTicks);
 };
 
 }  // namespace refactored

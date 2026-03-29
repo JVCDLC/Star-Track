@@ -10,6 +10,10 @@ namespace {
 
 static const bool kDebugLogsEnabled = true;
 static const unsigned long kDebugPeriodMs = 6000;
+// Staged launch delays for command "3" (CALIBRATE_ALL).
+// Adjust these values to tune the gap between motor calibration starts.
+static const unsigned long kCalibLaunchDelayRaToDecMs = 10;
+static const unsigned long kCalibLaunchDelayDecToFocMs = 10;
 
 PidConfig buildDecPid() { // PID config tuned for DEC axis
   PidConfig cfg;
@@ -33,28 +37,31 @@ PidConfig buildRaPid() { // PID configu tuned for RA axis
 
 PidConfig buildFocusPositionPid() { // PID config tuned for focus position control (used in both position and speed modes)
   PidConfig cfg;
-  cfg.kp = 0.10f;
-  cfg.ki = 0.05f;
-  cfg.kd = 0.0f;
-  cfg.integralMin = -500.0f;
-  cfg.integralMax = 500.0f;
+  // Focus needs smoother final convergence to avoid visible oscillation.
+  cfg.kp = 0.08f;
+  cfg.ki = 0.008f;
+  cfg.kd = 0.002f;
+  cfg.integralMin = -220.0f;
+  cfg.integralMax = 220.0f;
   return cfg;
 }
 
 SpeedPidConfig buildFocusSpeedPid() { // PID config tuned for focus speed control
   SpeedPidConfig cfg;
-  cfg.kp = 2.8f;
-  cfg.ki = 0.25f;
-  cfg.kd = 0.04f;
+  cfg.kp = 0.3f;
+  cfg.ki = 0.05f;
+  cfg.kd = 0.00f;
   cfg.integralMin = -400.0f;
   cfg.integralMax = 400.0f;
-  cfg.positionAssistKp = 0.8f;    // Additional position error correction term to help maintain accuracy at low speeds
-  cfg.slowdownWindowTicks = 30;   // Start slowing down when within 30 ticks of target to prevent overshoot
+  cfg.positionAssistKp = 0.0f;   // Lower assist to avoid speed overshoot on short sweeps
+  cfg.slowdownWindowTicks = 150;   // Keep full speed for most of the path, then decelerate near target
   cfg.minSpeedTicksPerSec = 0.8f; // Minimum speed to maintain when close to target (helps overcome stiction)
+  cfg.snapWindowTicks = 60;       // Hand over to position PID in final ticks for precise lock
+  cfg.speedLogSamplePeriodMs = 150; // Speed trace sample period for debug output
   return cfg;
 }
 
-MotorRuntimeConfig buildRuntimeCommon() { // Common runtime config for all motors (RA, DEC, Focus)
+MotorRuntimeConfig buildRuntimeCommon() { // Common runtime config for RA/DEC
   MotorRuntimeConfig cfg;
   cfg.pwmMax = 255;
   cfg.controlPeriodMs = 5;
@@ -63,9 +70,18 @@ MotorRuntimeConfig buildRuntimeCommon() { // Common runtime config for all motor
   return cfg;
 }
 
-CalibrationConfig buildCalibrationFast() {
+MotorRuntimeConfig buildRuntimeFocus() { // Focus runtime with extra settle tolerance near target
+  MotorRuntimeConfig cfg = buildRuntimeCommon();
+  // Hard safety cap for focus mechanics: never command above 100 PWM.
+  cfg.pwmMax = 100;
+  cfg.noMotionTimeoutMs = 3000;
+  cfg.atTargetToleranceTicks = 2;
+  return cfg;
+}
+
+CalibrationConfig buildCalibrationRa() {
   CalibrationConfig cfg;
-  // RA/DEC: aggressive 2-pass end-stop detection
+  // RA: aggressive 2-pass end-stop detection
   // (full-speed hit, backoff, slow verify hit, backoff).
   cfg.fastSeekPwm = 255;
   cfg.verifySeekPwm = 95;
@@ -84,14 +100,21 @@ CalibrationConfig buildCalibrationFast() {
   return cfg;
 }
 
+CalibrationConfig buildCalibrationDec() {
+  CalibrationConfig cfg = buildCalibrationRa();
+  // DEC is mechanically easier to drive and safer with a lower full-speed calibration seek.
+  cfg.fastSeekPwm = 210;
+  return cfg;
+}
+
 CalibrationConfig buildCalibrationFocus() {
   CalibrationConfig cfg;
   // Focus: single-switch homing only.
   // After homing to SW1, the controller waits in READY for the pi to send the calibration command for autofocus.
-  cfg.fastSeekPwm = 150;
-  cfg.verifySeekPwm = 65;
-  cfg.backoffPwm = 65;
-  cfg.backoffDurationMs = 180;
+  cfg.fastSeekPwm = 75;
+  cfg.verifySeekPwm = 30;
+  cfg.backoffPwm = 25;
+  cfg.backoffDurationMs = 1000;
   cfg.releaseStableMs = 40;
   cfg.verifyDeltaToleranceTicks = 6;
   cfg.singleSwitchHomeOnly = true;
@@ -99,7 +122,8 @@ CalibrationConfig buildCalibrationFocus() {
   cfg.centerSettleMs = 80;
   cfg.stictionScanStartPwm = 5;
   cfg.stictionScanStepPwm = 1;
-  cfg.stictionScanMaxPwm = 140;
+  // Keep stiction discovery inside the same hard focus PWM envelope.
+  cfg.stictionScanMaxPwm = 50;
   cfg.stictionSampleWindowMs = 120;
   cfg.stictionDetectTicks = 2;
   return cfg;
@@ -113,6 +137,18 @@ PrecisionConfig buildPrecisionCommon() { // Common precision config for all moto
   cfg.adaptiveRaiseDelayMs = 120;
   cfg.adaptiveRaiseStep = 1;
   cfg.adaptiveDropStep = 1;
+  return cfg;
+}
+
+PrecisionConfig buildPrecisionFocus() {
+  PrecisionConfig cfg = buildPrecisionCommon();
+  // Focus does not need aggressive reverse kicks like RA/DEC.
+  // Disable 1-tick overshoot micro-correction on focus to avoid
+  // visible oscillation at the end of travel.
+  cfg.overshootWindowTicks = 0;
+  cfg.reverseKickMs = 8;
+  cfg.reverseKickExtraPwm = 8;
+  cfg.adaptiveRaiseDelayMs = 180;
   return cfg;
 }
 
@@ -177,32 +213,32 @@ MountController::MountController() // Constructor initializes motors and state
                      true,  SwitchId::SW4, +1,  // VERT
                      true,  SwitchId::SW5, -1, // JAUNE
                      43000}, // Fallback span if no switches: 43000 ticks
-                 buildCalibrationFast(),
+                 buildCalibrationDec(),
                  buildPrecisionCommon()),
       m_motorRa("RA",
                 MotorId::AXIS_RA,
                 Bts7960Pins{pins::RA_RPWM, pins::RA_LPWM, pins::RA_REN, pins::RA_LEN},
-                buildRaPid(),
-                buildRuntimeCommon(),
+                 buildRaPid(),
+                 buildRuntimeCommon(),
                 LimitConfig{
                     true,  SwitchId::SW3, -1, // ORANGE
-                    true,  SwitchId::SW2, +1, // BLEU
+                    true,  SwitchId::SW6, +1, // BLEU
                     600000},
-                buildCalibrationFast(),
+                buildCalibrationRa(),
                 buildPrecisionCommon()),
       m_motorFoc("FOC",
                  MotorId::AXIS_FOC,
                  Md13sPins{pins::FOC_PWM, pins::FOC_DIR, true},
                  buildFocusPositionPid(),
                  buildFocusSpeedPid(),
-                 buildRuntimeCommon(),
+                 buildRuntimeFocus(),
                  LimitConfig{
                      // Keep focus on a dedicated single home switch (no shared DEC switch).
                      true,   SwitchId::SW1, -1, // MAUVE
                      false,  SwitchId::SW1, +1,
-                     10000},
+                     10116},
                  buildCalibrationFocus(),
-                 buildPrecisionCommon()),
+                 buildPrecisionFocus()),
       m_state(MountState::UNINITIALIZED),
       m_lastDebugMs(0),
       m_lastPrintedMountState(MountState::UNINITIALIZED),
@@ -210,9 +246,11 @@ MountController::MountController() // Constructor initializes motors and state
       m_lastPrintedDecState(MotorState::UNINITIALIZED),
       m_lastPrintedFocState(MotorState::UNINITIALIZED),
       m_selfTest{false, NULL, 0, 0, 0, 0},
+      m_calibrationLaunch{false, 0, 0},
       m_debugFocusActive(false),
       m_debugStartMs(0),
-      m_lastDebugPrintMs(0) {}
+      m_lastDebugPrintMs(0),
+      m_emitDoneWhenReady(false) {}
 
 void MountController::begin() { // Initializes hardware and starts calibration
   // Silent PWM setup
@@ -255,13 +293,27 @@ MotorBase* MountController::selectMotor(MotorSelector selector) {
 }
 
 void MountController::startParallelCalibration() {
-  m_motorDec.requestCalibration();
+  // Staged startup requested by host:
+  // 1) RA now
+  // 2) DEC after delay
+  // 3) FOC after delay
+  cancelCalibrationLaunch();
   m_motorRa.requestCalibration();
-  m_motorFoc.requestCalibration();
+  m_calibrationLaunch.active = true;
+  m_calibrationLaunch.stage = 1;
+  m_calibrationLaunch.stageStartMs = millis();
+
+  if (kDebugLogsEnabled) {
+    Serial.print(F("DBG,CALIB,LAUNCH,RA_NOW,DEC_DELAY_MS="));
+    Serial.print(kCalibLaunchDelayRaToDecMs);
+    Serial.print(F(",FOC_DELAY_MS="));
+    Serial.println(kCalibLaunchDelayDecToFocMs);
+  }
   m_state = MountState::CALIBRATING;
 }
 
 bool MountController::startSingleMotorCalibration(MotorSelector selector) {
+  cancelCalibrationLaunch();
   MotorBase* motor = selectMotor(selector);
   if (motor == NULL) {
     return false;
@@ -316,9 +368,54 @@ bool MountController::startMotionSelfTest(MotorSelector selector, long requested
 }
 
 void MountController::emergencyStopAll() {
+  cancelCalibrationLaunch();
   m_motorDec.emergencyStopAndHold();
   m_motorRa.emergencyStopAndHold();
   m_motorFoc.emergencyStopAndHold();
+}
+
+void MountController::cancelCalibrationLaunch() {
+  m_calibrationLaunch.active = false;
+  m_calibrationLaunch.stage = 0;
+  m_calibrationLaunch.stageStartMs = 0;
+}
+
+void MountController::updateCalibrationLaunch(unsigned long nowMs) {
+  if (!m_calibrationLaunch.active) {
+    return;
+  }
+
+  // Safety: if any axis faults while launch is pending, stop scheduling.
+  if (m_motorRa.isError() || m_motorDec.isError() || m_motorFoc.isError()) {
+    cancelCalibrationLaunch();
+    return;
+  }
+
+  if (m_calibrationLaunch.stage == 1) {
+    if ((nowMs - m_calibrationLaunch.stageStartMs) >= kCalibLaunchDelayRaToDecMs) {
+      m_motorDec.requestCalibration();
+      m_calibrationLaunch.stage = 2;
+      m_calibrationLaunch.stageStartMs = nowMs;
+      if (kDebugLogsEnabled) {
+        Serial.println(F("DBG,CALIB,LAUNCH,DEC_NOW"));
+      }
+    }
+    return;
+  }
+
+  if (m_calibrationLaunch.stage == 2) {
+    if ((nowMs - m_calibrationLaunch.stageStartMs) >= kCalibLaunchDelayDecToFocMs) {
+      m_motorFoc.requestCalibration();
+      if (kDebugLogsEnabled) {
+        Serial.println(F("DBG,CALIB,LAUNCH,FOC_NOW"));
+      }
+      cancelCalibrationLaunch();
+    }
+    return;
+  }
+
+  // Unknown stage: fail safe by disabling launcher.
+  cancelCalibrationLaunch();
 }
 
 bool MountController::processCommand(const SerialCommand& cmd) {
@@ -329,9 +426,11 @@ bool MountController::processCommand(const SerialCommand& cmd) {
   // 3 (calibrate all)
   // 4,<RA|DEC|FOC> (calibrate one motor)
   // 5,<RA|DEC|FOC>[,deltaTicks] (on-board motion self-test)
+  // 7,<RA|DEC|FOC>,<POS|SPD>,<kp>,<ki>,<kd> (runtime PID tuning)
   switch (cmd.action) {
     case CommandAction::STOP_ALL:
       emergencyStopAll();
+      m_emitDoneWhenReady = false;
       return true;
 
     case CommandAction::MOVE_ABSOLUTE: {
@@ -345,6 +444,9 @@ bool MountController::processCommand(const SerialCommand& cmd) {
         Serial.print(motorStateText(motor->readState()));
         Serial.print(F(",target="));
         Serial.println(cmd.targetTicks);
+      }
+      if (ok) {
+        m_emitDoneWhenReady = true;
       }
       return ok;
     }
@@ -362,10 +464,12 @@ bool MountController::processCommand(const SerialCommand& cmd) {
         }
         return false;
       }
+      m_emitDoneWhenReady = true;
       return true;
 
     case CommandAction::CALIBRATE_ALL:
       startParallelCalibration();
+      m_emitDoneWhenReady = true;
       return true;
 
     case CommandAction::CALIBRATE_ONE:
@@ -375,6 +479,7 @@ bool MountController::processCommand(const SerialCommand& cmd) {
         }
         return false;
       }
+      m_emitDoneWhenReady = true;
       return true;
 
     case CommandAction::MOTION_SELF_TEST:
@@ -386,6 +491,40 @@ bool MountController::processCommand(const SerialCommand& cmd) {
       m_debugStartMs = millis();
       m_lastDebugPrintMs = 0;
       return true;
+
+    case CommandAction::SET_PID: {
+      if (cmd.pidSelector == PidSelector::POSITION) {
+        MotorBase* motor = selectMotor(cmd.motor);
+        if (motor == NULL) return false;
+        const bool ok = motor->setPositionPidGains(cmd.pidKp, cmd.pidKi, cmd.pidKd);
+        if (ok && kDebugLogsEnabled) {
+          Serial.print(F("DBG,PID_SET,motor="));
+          Serial.print(motor->readName());
+          Serial.print(F(",loop=POS,kp="));
+          Serial.print(cmd.pidKp, 6);
+          Serial.print(F(",ki="));
+          Serial.print(cmd.pidKi, 6);
+          Serial.print(F(",kd="));
+          Serial.println(cmd.pidKd, 6);
+        }
+        return ok;
+      }
+
+      if (cmd.pidSelector == PidSelector::SPEED) {
+        if (cmd.motor != MotorSelector::MOTOR_FOC) return false;
+        const bool ok = m_motorFoc.setSpeedPidGains(cmd.pidKp, cmd.pidKi, cmd.pidKd);
+        if (ok && kDebugLogsEnabled) {
+          Serial.print(F("DBG,PID_SET,motor=FOC,loop=SPD,kp="));
+          Serial.print(cmd.pidKp, 6);
+          Serial.print(F(",ki="));
+          Serial.print(cmd.pidKi, 6);
+          Serial.print(F(",kd="));
+          Serial.println(cmd.pidKd, 6);
+        }
+        return ok;
+      }
+      return false;
+    }
 
     case CommandAction::INVALID:
     default:
@@ -495,6 +634,12 @@ void MountController::updateMountState() {
     return;
   }
 
+  // Keep mount in CALIBRATING while staged launcher is still pending.
+  if (m_calibrationLaunch.active) {
+    m_state = MountState::CALIBRATING;
+    return;
+  }
+
   if (m_motorDec.isCalibrating() || m_motorRa.isCalibrating() || m_motorFoc.isCalibrating()) {
     m_state = MountState::CALIBRATING;
     return;
@@ -525,11 +670,26 @@ void MountController::update() {
   }
 
   const unsigned long nowMs = millis();
+  updateCalibrationLaunch(nowMs);
   m_motorDec.update(nowMs);
   m_motorRa.update(nowMs);
   m_motorFoc.update(nowMs);
   updateMotionSelfTest(nowMs);
   updateMountState();
+
+  if (m_state == MountState::ERROR) {
+    m_emitDoneWhenReady = false;
+  }
+
+  // Completion handshake for host software:
+  // - 0: rejected (already emitted in command parser loop)
+  // - 1: accepted (already emitted in command parser loop)
+  // - 2: done (emitted once when mount reaches READY after an accepted command)
+  if (m_emitDoneWhenReady && m_state == MountState::READY) {
+    Serial.println(2);
+    m_emitDoneWhenReady = false;
+  }
+
   emitDebug(nowMs);
 
   // Handle focus debug mode

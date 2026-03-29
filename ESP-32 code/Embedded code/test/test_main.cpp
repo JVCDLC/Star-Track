@@ -2,7 +2,7 @@
 #include <unity.h>
 
 #if defined(STARTRACK_ENABLE_REFACTORED_ARCH)
-#include "../../src/refactored/serial_protocol.hpp"
+#include "../src/refactored/serial_protocol.hpp"
 
 using namespace refactored;
 
@@ -55,6 +55,19 @@ void test_parse_debug_focus() {
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MotorSelector::MOTOR_FOC), static_cast<uint8_t>(cmd.motor));
 }
 
+void test_parse_set_pid() {
+  SerialProtocol parser;
+  SerialCommand cmd;
+  char line[] = "7,FOC,SPD,2.8,0.2,0.05";
+  TEST_ASSERT_TRUE(parser.parseFromCString(line, cmd));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CommandAction::SET_PID), static_cast<uint8_t>(cmd.action));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MotorSelector::MOTOR_FOC), static_cast<uint8_t>(cmd.motor));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PidSelector::SPEED), static_cast<uint8_t>(cmd.pidSelector));
+  TEST_ASSERT_FLOAT_WITHIN(0.0001f, 2.8f, cmd.pidKp);
+  TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.2f, cmd.pidKi);
+  TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.05f, cmd.pidKd);
+}
+
 #else
 void test_refactored_not_enabled() {
   TEST_PASS();
@@ -70,6 +83,7 @@ void setup() {
   RUN_TEST(test_parse_single_motor_calibration);
   RUN_TEST(test_parse_motion_self_test);
   RUN_TEST(test_parse_debug_focus);
+  RUN_TEST(test_parse_set_pid);
 #else
   RUN_TEST(test_refactored_not_enabled);
 #endif

@@ -125,6 +125,7 @@ class MotorBase {
   bool commandPositionTicks(long targetTicks);
   virtual bool commandSpeedTicksPerSecond(long targetTicks, float ticksPerSecond);
   void emergencyStopAndHold();
+  bool setPositionPidGains(float kp, float ki, float kd);
 
   long readTicks() const;
   void writeTicks(long ticks);
@@ -152,6 +153,10 @@ class MotorBase {
                                     float dtSeconds,
                                     long currentTicks,
                                     unsigned long nowMs);
+  virtual void onTargetReached(unsigned long nowMs, long currentTicks) {
+    (void)nowMs;
+    (void)currentTicks;
+  }
 
   MotionMode readMotionMode() const { return m_motionMode; }
   long readCurrentTargetForControl() const { return m_targetTicks; }
@@ -169,7 +174,7 @@ class MotorBase {
   const char* m_name;
   const MotorId m_encoderId;
 
-  const PidConfig m_pid;
+  PidConfig m_pid;
   const MotorRuntimeConfig m_runtime;
   const LimitConfig m_limits;
   const CalibrationConfig m_calibration;

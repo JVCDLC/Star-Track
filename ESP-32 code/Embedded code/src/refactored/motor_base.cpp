@@ -144,7 +144,7 @@ bool MotorBase::commandPositionTicks(long targetTicks) {
   m_motionMode = MotionMode::POSITION;  // Use position control mode
   resetController();                // Clear PID state for fresh start
 
-  if (readTicks() == m_targetTicks) {
+  if (absLong(readTicks() - m_targetTicks) <= static_cast<long>(m_runtime.atTargetToleranceTicks)) {
     // Already at target - go to ready state
     m_state = MotorState::READY;
     applyDriverPwm(0);
@@ -166,6 +166,27 @@ bool MotorBase::commandPositionTicks(long targetTicks) {
  */
 bool MotorBase::commandSpeedTicksPerSecond(long, float) {
   return false;  // Not supported in base class
+}
+
+/**
+ * @brief Update position-loop PID gains at runtime.
+ * @param kp New proportional gain
+ * @param ki New integral gain
+ * @param kd New derivative gain
+ * @return true if gains are valid and applied
+ */
+bool MotorBase::setPositionPidGains(float kp, float ki, float kd) {
+  if (!isfinite(kp) || !isfinite(ki) || !isfinite(kd)) {
+    return false;
+  }
+  if (kp < 0.0f || ki < 0.0f || kd < 0.0f) {
+    return false;
+  }
+  m_pid.kp = kp;
+  m_pid.ki = ki;
+  m_pid.kd = kd;
+  resetController();
+  return true;
 }
 
 /**
@@ -324,6 +345,11 @@ void MotorBase::enterError() {
  * Used during calibration phases.
  */
 void MotorBase::driveOpenLoopDirectional(int8_t direction, uint8_t pwmMagnitude) {
+  // Enforce per-motor runtime PWM cap in open-loop states (calibration, backoff, etc.).
+  if (pwmMagnitude > m_runtime.pwmMax) {
+    pwmMagnitude = m_runtime.pwmMax;
+  }
+
   if (direction == 0 || pwmMagnitude == 0) {
     applyDriverPwm(0);      // Stop if no direction or no magnitude
     m_lastAppliedDirection = 0;
@@ -518,10 +544,32 @@ void MotorBase::updateCalibration(unsigned long nowMs) {
             Serial.print(m_name);
             Serial.println(F(",MIN_VERIFY_MISMATCH"));
           }
-          m_calStateStartMs = nowMs;
-          m_state = MotorState::BACKOFF_AFTER_MIN_VERIFY;
-          applyDriverPwm(0);
-          m_lastAppliedDirection = 0;
+
+          // Focus single-switch flow ends here by design:
+          // 1) hit min at fast speed
+          // 2) back off
+          // 3) re-hit min slowly
+          // 4) stop and stay on switch as home (tick 0)
+          if (m_calibration.singleSwitchHomeOnly) {
+            writeTicks(0);
+            m_limitMinTick = 0;
+            m_limitMaxTick = m_limits.fallbackSpanTicks;
+            m_limitsKnown = true;
+            m_targetTicks = 0;
+            forceReadyAtCurrentPosition();
+            Serial.print(F("DBG,"));
+            Serial.print(m_name);
+            Serial.print(F(",HOME_DONE,range=["));
+            Serial.print(m_limitMinTick);
+            Serial.print(F(","));
+            Serial.print(m_limitMaxTick);
+            Serial.println(F("]"));
+          } else {
+            m_calStateStartMs = nowMs;
+            m_state = MotorState::BACKOFF_AFTER_MIN_VERIFY;
+            applyDriverPwm(0);
+            m_lastAppliedDirection = 0;
+          }
         }
       } else {
         m_releaseStableStartMs = 0;
@@ -546,15 +594,34 @@ void MotorBase::updateCalibration(unsigned long nowMs) {
       if (!m_limits.hasMaxSwitch) {
         // Single-switch mode (focus): return to home switch and stop there.
         if (m_calibration.singleSwitchHomeOnly && m_limits.hasMinSwitch) {
+          // Final homing pass:
+          // 1) approach home at slow verification speed
+          // 2) require stable switch activation to avoid edge bounce
+          // 3) define software travel window [0 .. fallbackSpanTicks]
+          // 4) stay parked at home (tick 0)
           if (InterruptHub::isSwitchTriggered(m_limits.minSwitch)) {
-            writeTicks(0);
-            m_limitsKnown = false;  // No bounded max range in one-switch mode.
-            m_targetTicks = 0;
-            forceReadyAtCurrentPosition();
-            Serial.print(F("DBG,"));
-            Serial.print(m_name);
-            Serial.println(F(",HOME_DONE"));
+            if (m_releaseStableStartMs == 0) {
+              m_releaseStableStartMs = nowMs;
+              applyDriverPwm(0);
+              m_lastAppliedDirection = 0;
+            } else if ((nowMs - m_releaseStableStartMs) >= m_calibration.releaseStableMs) {
+              m_releaseStableStartMs = 0;
+              writeTicks(0);
+              m_limitMinTick = 0;
+              m_limitMaxTick = m_limits.fallbackSpanTicks;
+              m_limitsKnown = true;  // Enforce hard software window after homing.
+              m_targetTicks = 0;
+              forceReadyAtCurrentPosition();
+              Serial.print(F("DBG,"));
+              Serial.print(m_name);
+              Serial.print(F(",HOME_DONE,range=["));
+              Serial.print(m_limitMinTick);
+              Serial.print(F(","));
+              Serial.print(m_limitMaxTick);
+              Serial.println(F("]"));
+            }
           } else {
+            m_releaseStableStartMs = 0;
             driveOpenLoopDirectional(m_limits.dirTowardMin, m_calibration.verifySeekPwm);
           }
           break;
@@ -979,12 +1046,27 @@ void MotorBase::applyCommandedPwm(int16_t signedPwm,
   }
 
   if (directionBlockedByLimit(direction)) {
-    // Hard stop at end-stop and freeze target at current position.
-    signedPwm = 0;
-    m_targetTicks = currentTicks;
-    m_state = MotorState::READY;
-    m_motionMode = MotionMode::POSITION;
-    resetController();
+    // In SPEED mode, a short reverse pulse can appear from speed-loop transients.
+    // If that reverse direction is blocked by a pressed end-stop but the desired
+    // target direction is safe, recover by forcing a minimum forward command
+    // instead of prematurely finishing the move.
+    const int8_t desiredDir = signOf(errorTicks);
+    if (m_motionMode == MotionMode::SPEED &&
+        desiredDir != 0 &&
+        desiredDir != direction &&
+        !directionBlockedByLimit(desiredDir)) {
+      const uint8_t floor = readAdaptiveMinPwmForDir(desiredDir);
+      signedPwm = static_cast<int16_t>(desiredDir * floor);
+      direction = desiredDir;
+    } else {
+      // Hard stop at end-stop and freeze target at current position.
+      signedPwm = 0;
+      m_targetTicks = currentTicks;
+      m_state = MotorState::READY;
+      m_motionMode = MotionMode::POSITION;
+      resetController();
+      direction = 0;
+    }
   }
 
   applyDriverPwm(signedPwm);
@@ -1093,10 +1175,14 @@ void MotorBase::updateMotion(unsigned long nowMs, float dtSeconds) {
     return;
   }
 
-  // Check if target reached
-  if (errorTicks == 0) {
+  // Check if target reached within configured tolerance.
+  // RA/DEC keep strict behavior with tolerance=0, while focus can
+  // use a small deadband (e.g. 1-2 ticks) to prevent end-of-move hunting.
+  const long settleTol = static_cast<long>(m_runtime.atTargetToleranceTicks);
+  if (absLong(errorTicks) <= settleTol) {
     applyCommandedPwm(0, nowMs, currentTicks, errorTicks);  // Stop motor
     m_state = MotorState::READY;                             // Go to ready state
+    onTargetReached(nowMs, currentTicks);
     m_prevErrorTicks = 0;
     return;
   }

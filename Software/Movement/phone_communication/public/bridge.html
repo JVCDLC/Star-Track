@@ -401,6 +401,7 @@
                 <h2>System</h2>
                 <div class="stack">
                     <div class="row"><span class="label">Connection</span><span class="value" id="conn-status">Connecting</span></div>
+                    <div class="row"><span class="label">Init</span><span class="value" id="init-status">WAITING</span></div>
                     <div class="row"><span class="label">Commander</span><span class="value" id="commander-text">NONE</span></div>
                     <div class="row"><span class="label">Joystick User</span><span class="value" id="joystick-user-text">NONE</span></div>
                     <div class="row"><span class="label">Joystick Vector</span><span class="value" id="joystick-vector-text">0.00 / 0.00</span></div>
@@ -593,6 +594,14 @@
                 motor: { tracking_with_camera: true, compensate_earth_rotation: true },
                 focus: { mode: "auto", manual_value: 50 },
                 capture: { video_duration: 10, last_photo_at: "", last_video_request_at: "", last_video_duration: 10 },
+                vision_status: { ready: false, stage: "initializing", focus_score: 0 },
+                system: {
+                    vision_ready: false,
+                    astronomic_ready: false,
+                    controls_ready: false,
+                    catalog_ready: false,
+                    message: "Waiting for initialization."
+                },
                 datetime: "",
                 timestamp: null
             },
@@ -623,6 +632,7 @@
             pinInput: document.getElementById("pin-input"),
             loginBtn: document.getElementById("login-btn"),
             connStatus: document.getElementById("conn-status"),
+            initStatus: document.getElementById("init-status"),
             commanderText: document.getElementById("commander-text"),
             joystickUserText: document.getElementById("joystick-user-text"),
             joystickVectorText: document.getElementById("joystick-vector-text"),
@@ -881,6 +891,12 @@
                 return;
             }
 
+            if (packet.type === "CATALOG_UPDATE") {
+                state.catalog = packet.catalog || {};
+                renderTelemetry();
+                return;
+            }
+
             if (packet.type === "EMERGENCY_STOP") {
                 window.location.href = "/";
                 return;
@@ -924,7 +940,9 @@
                 camera: { ...state.telemetry.camera, ...(data.camera || {}) },
                 motor: { ...state.telemetry.motor, ...(data.motor || {}) },
                 focus: { ...state.telemetry.focus, ...(data.focus || {}) },
-                capture: { ...state.telemetry.capture, ...(data.capture || {}) }
+                capture: { ...state.telemetry.capture, ...(data.capture || {}) },
+                vision_status: { ...state.telemetry.vision_status, ...(data.vision_status || {}) },
+                system: { ...state.telemetry.system, ...(data.system || {}) }
             };
 
             if (data.timestamp !== undefined && data.timestamp !== null) {
@@ -1008,9 +1026,11 @@
             const joystick = state.telemetry.joystick;
             const mission = state.telemetry.mission;
             const capture = state.telemetry.capture;
+            const system = state.telemetry.system || {};
 
             el.clockText.textContent = formatClock();
             el.datetimeText.textContent = state.telemetry.datetime || "--";
+            el.initStatus.textContent = system.controls_ready ? "READY" : "WAITING";
             el.gpsLatText.textContent = formatNumber(gps.lat, 6);
             el.gpsLonText.textContent = formatNumber(gps.lon, 6);
             el.gpsAltText.textContent = formatNumber(gps.alt, 2);
@@ -1022,6 +1042,23 @@
 
             el.overlayMissionText.textContent = `${targetLabelForId(mission.target)} / ${mission.action || "--"}`;
             el.overlayGpsText.textContent = `${formatNumber(gps.lat, 4)} / ${formatNumber(gps.lon, 4)}`;
+            applyInitializationLock();
+        }
+
+        function applyInitializationLock() {
+            const ready = Boolean(state.telemetry.system?.controls_ready);
+            const disableDuringInit = [
+                el.photoBtn,
+                el.videoBtn,
+                el.applyCameraBtn,
+                el.applyMotorBtn,
+                el.applyFocusBtn
+            ];
+            disableDuringInit.forEach((button) => {
+                if (button) {
+                    button.disabled = !ready;
+                }
+            });
         }
 
         function renderQueueManager(queueEntries = normalizeQueueEntries(state.sysInfo.joystick_queue)) {
@@ -1128,6 +1165,16 @@
             el.setCommanderBtn.disabled = false;
         }
 
+        function controlsReadyForType(type) {
+            const allowedDuringInit = new Set(["GPS_UPDATE", "SYNC_CLOCK", "TIMESTAMP", "DATETIME", "EMERGENCY_STOP"]);
+            const ready = Boolean(state.telemetry.system?.controls_ready);
+            if (ready || allowedDuringInit.has(type)) {
+                return true;
+            }
+            showToast(state.telemetry.system?.message || "System is still initializing.");
+            return false;
+        }
+
         function sendGpsFromForm() {
             const lat = Number.parseFloat(el.gpsLatInput.value);
             const lon = Number.parseFloat(el.gpsLonInput.value);
@@ -1188,6 +1235,9 @@
         }
 
         function sendCameraSettings() {
+            if (!controlsReadyForType("CAMERA_SETTINGS")) {
+                return;
+            }
             const exposure = clampNumber(parseInt(el.cameraExposureInput.value, 10), 1, 10000000);
             const gain = clampNumber(parseInt(el.cameraGainInput.value, 10), 0, 600);
             const type = el.cameraTypeSelect.value;
@@ -1204,6 +1254,9 @@
         }
 
         function sendMotorSettings() {
+            if (!controlsReadyForType("MOTOR_SETTINGS")) {
+                return;
+            }
             clearDirtyFields("tracking-toggle", "rotation-toggle");
             if (sendPacket({
                 type: "MOTOR_SETTINGS",
@@ -1217,6 +1270,9 @@
         }
 
         function sendFocusSettings() {
+            if (!controlsReadyForType("FOCUS_SETTINGS")) {
+                return;
+            }
             const manualValue = clampNumber(parseInt(el.focusInput.value, 10), 0, 100);
             clearDirtyFields("focus-mode-select", "focus-range", "focus-input");
             if (sendPacket({
@@ -1232,12 +1288,18 @@
         }
 
         function sendPhotoRequest() {
+            if (!controlsReadyForType("PHOTO_REQUEST")) {
+                return;
+            }
             if (sendPacket({ type: "PHOTO_REQUEST" })) {
                 addLog("Photo requested.");
             }
         }
 
         function sendVideoRequest() {
+            if (!controlsReadyForType("VIDEO_REQUEST")) {
+                return;
+            }
             const duration = clampNumber(parseInt(el.videoDurationInput.value, 10), 1, 3600);
             clearDirtyFields("video-duration-input");
             if (sendPacket({ type: "VIDEO_REQUEST", duration })) {

@@ -1,677 +1,702 @@
-import numpy as np
+import copy
 import time
-import catalog; from catalog import CATALOG
-from skyfield.api import load, Star, wgs84, Topos
-from skyfield.data import hipparcos
-from datetime import timedelta
-from enum import Enum
-from skyfield import almanac
-from pytz import timezone
-from timezonefinder import TimezoneFinder
+from collections import deque
+from datetime import datetime, timedelta
+from pathlib import Path
+from threading import Event, Lock, Thread
 
-#console input without blocking the main loop
 try:
-    import msvcrt  # Windows-specific; provides getch/ kbhit
-except ImportError:
-    msvcrt = None
+    import serial
+except Exception:
+    serial = None
+
+try:
+    from skyfield.api import Loader, Star, wgs84
+    from skyfield.data import hipparcos
+except Exception:
+    Loader = None
+    Star = None
+    wgs84 = None
+    hipparcos = None
+
+try:
+    from skyfield import almanac
+except Exception:
+    almanac = None
 
 
-
-#load the star catalog from hipparcos
-with load.open(hipparcos.URL) as f:
-    stars = hipparcos.load_dataframe(f)
-
-#-------------------------------------------------------------------------------------------#
-#Global variables and initializations
+def _clamp(value, low, high):
+    return max(low, min(high, value))
 
 
-# from skyfield.api import Loader
-#on the pi : scp -r ~/.skyfield pi@raspberrypi.local:/home/pi/
-# load = Loader('/home/pi/skyfield-data', expire=False) OFFLINE
-# timeScale = load.timescale()
-# currentTime = timeScale.now()
-# solarSystem = load('de421.bsp')
-
-timeScale = load.timescale()
-currentTime = timeScale.now()
-solarSystem = load('de421.bsp') #Planet data including the SUN and the MOON
-earth = solarSystem['earth']
-polaris= Star.from_dataframe(stars.loc[11767]) #refrence star Polaris
-visibleCatalog = CATALOG
-
-
-
-#-------------------------------------------------------------------------------------------#
-#position of the observer
-    #Sherbrooke, QC : 45.365434 , -71.939477
-latitude = 45.365434 #  N 45° 21' 55.563''
-longitude = -71.939477 # W 71° 56' 22.115''
-observer = earth + wgs84.latlon(latitude, longitude) # topos????
-timeZone = 'America/Toronto'
-
-#-------------------------------------------------------------------------------------------#
-
-celestialBody = {}
-
-
-
-for i in CATALOG["tab-solar"]:
-    celestialBody[i['name']] = solarSystem[i['id']]
-
-for i in CATALOG["tab-stars"]:
-    celestialBody[i['name']] = Star.from_dataframe(stars.loc[int(i['id'])])
-
-for i in CATALOG["tab-deep"]:
-    celestialBody[i['name']] = Star(ra_hours=i['ra_hours'], dec_degrees=i['dec_degrees'])
-    
-
-#-------------------------------------------------------------------------------------------#
-
-class MOVEMENTSTATE(Enum):
-    MISSION_TO_TARGET = 1
-    TRACKING_WITH_CAMERA = 2
-    MANUAL_CONTROL = 3
-
-stateOfTelescope = 0 # 0: do nothing, 1: move to new target, 2: tracking with camera, 3: manual control
-compensateEarthrotation: bool = True 
-
-raToMotor = 0 # Right Ascension in degrees
-decToMotor = 0 # Declination in degrees
-focusToMotor = 0
-
-#Variables for movement
-INTERVALS = {
-    'variable_update': 0.01,
-    'tracking': 10,
-    'manual': 0.1,
-    'earth_rotation': 2
-}
-
-next_updates = {key: time.monotonic() + interval for key, interval in INTERVALS.items()}
-
-
-EARTH_ROTATION_SPEED = 360/24/3600 # degrees per sec : 0.0041667 min_motor_speed : 0,00833
-MANUAL_SPEED_MAX = 5*EARTH_ROTATION_SPEED # degees per second 
-MAX_INPUT_FROM_JOYSTICK = [-1,1]
-RA_MINIMUM = 0.00833 ###########TO CHANGE ONE NEW GEAR# minimum change in RA to send a new command to the motors in degrees
-DEC_MINIMUM = 0.00833 # minimum change in Dec to send a new command to
-#-----------------------------------------------------------#
-#camera spec
-FOCAL_LENGHT_mm = 400
-CAMERA_PIXEL_SIZE_um = 5.2
-PIXEL_TO_ANGLE_deg = ( (CAMERA_PIXEL_SIZE_um /1000 )/ FOCAL_LENGHT_mm) * (180/np.pi) # Angle subtended by one pixel in degrees
-X_RESOLUTION = 1304
-Y_RESOLUTION = 976
-fieldOfViewX_deg = PIXEL_TO_ANGLE_deg * X_RESOLUTION
-fieldOfViewY_deg = PIXEL_TO_ANGLE_deg * Y_RESOLUTION
-
-camAngle = 0 # angle of the camera in degrees, 0 -> top , 90 -> right
-#---------------------------END OF GLOBAL VARIABLES--------------------------------{
-
-
-
-
-    #-----------------------------------------------------------#
-    #                  Functions to implement
-    #-----------------------------------------------------------#
-
-
-#----------------------ATRONOMICAL CALCULATION FUNCTION-------------------------------------#
-def updateLocation(lat,lon):
-    """
-        Update the observer location
-        Inputs: lat : Latitude in decimal degrees
-                lon : Longitude in decimal degrees
-        Outputs: None
-    """
-    global observer
-    global timeZone
-    observer = earth + wgs84.latlon(lat, lon)
-    timeZone = str(timezone_from_position(lat,lon))
-    return
-
-def timezone_from_position(lat, lon):
-    tf = TimezoneFinder()
-    tz_name = tf.timezone_at(lat=lat, lng=lon)
-    if tz_name is None:
+def _parse_datetime_to_ms(value):
+    if not value:
         return None
-    return timezone(tz_name)
-
-# def isVisible(CB):
-#     """
-#         Check if a celestial body is visible from the observer location
-#         Inputs: CB : name of Celestial Body object from skyfield
-#         Outputs: True if the celestial body is above the horizon, False otherwise
-#     """
-#     global currentTime
-#     currentTime = timeScale.now()
-#     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz()
-#     altitude = observerInfo[0].degrees
-#     if altitude > 0: # we consider the object visible if its altitude is greater than 0 degrees to avoid tracking objects too close to the horizon
-#         # print("the object is visible, altitude :", altitude)
-#         return True
-#     else:
-#         # print("the object is not visible, altitude :", altitude)
-#         return False
-
-def update_visible_catalog():
-    """
-        Update the visible catalog by checking the visibility of each celestial body in the catalog
-        Order the catalog by tab and by higher altitude
-        Inputs: None
-        Outputs: none
-    """
-    print('Applying visibility filter to the catalog...')
-    
-    global visibleCatalog
-    visibleCatalog = {key: [] for key in CATALOG.keys()} # reset the visible catalog
-    #print("test", visibleCatalog)
-    for key in CATALOG.keys():
-        for Body in CATALOG[key]:
-            
-            try: 
-                rising, setting, visible = rising_setting_time(celestialBody[Body['name']])
-                Body['rising'] = rising
-                Body['setting'] = setting
-                rising25,setting25=rising_setting_above_alt(celestialBody[Body['name']],25)
-                Body['rising25'] = rising25
-                Body['setting25'] = setting25
-                rising45,setting45=rising_setting_above_alt(celestialBody[Body['name']],45)
-                Body['rising45'] = rising45
-                Body['setting45'] = setting45
-                visibleCatalog[key].append(Body)
-                #print_HaDec(celestialBody[Body['name']], Body['name'])
-                    
-            except KeyError:
-                print("Error: Celestial body", Body['name'], "not found in celestialBody dictionary.")
-
-    return visibleCatalog
-
-
-def print_HaDec(CB,name=''):
-    """
-        Coordonate printing function for celestial bodies
-        The coordonate are given in Right Ascension, Hour Angle and Declination
-        Hour angle (HA) and Declination (dec) are directly related to RA_motor and Dec_motor
-        Inputs: CB : Celestial Body object from skyfield
-                name : Name of the celestial body (string)
-        Outputs: None
-    """
-    global currentTime
-    currentTime = timeScale.now()
-    observerInfo = observer.at(currentTime).observe(CB).apparent().hadec() 
-    ha = observerInfo[0].degrees
-    dec = observerInfo[1].degrees
-    print('\nCurrent position of', name)
-    #print('  HA :', ha)
-    if abs(ha) > 90:
-        print("Warning: The object (OLD) HA is greater than 90°")
-    #print('  Dec:', dec)
-    #print('Distance:', observerInfo[2])
-    
-    new_ha, new_dec = new_ha_dec(ha,dec)
-
-    print(f" new_ha : {new_ha:.3f} °")
-    if abs(new_ha) > 90:
-        print("Warning: The object new HA is greater than 90°!!!!!!!!!!!!!!!!!!!!!")
-    print(f"  new_dec: {new_dec:.3f} °")
-    return  new_ha, new_dec 
-
-# def print_AltAz(CB,name=''):
-#     """
-#         Coordonate printing function for celestial bodies
-#         The coordonate are given in Altitude and Azimuth
-#         Inputs: CB : Celestial Body object from skyfield
-#                 name : Name of the celestial body (string)
-#         Outputs: None
-#     """
-#     global currentTime
-#     currentTime = timeScale.now()
-#     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz() 
-#     print('\nCurrent position of', name)
-#     print('  Altitude :', observerInfo[0])
-#     print('  Azimuth:', observerInfo[1])
-#     print('  Distance:', observerInfo[2])
-    
-    # return  observerInfo[0].degrees, observerInfo[1].degrees #Alt,Az
-
-def new_ha_dec(ha,dec):
-    """
-        Convert ha [-180;180] and dec [-90;90]
-        to
-        ha [-90;90] and dec [-180;180]
-        This is usefull because the ha motor need to be limite in it's motion to protect the telescope
-    """
-    new_ha = (ha % 360 -90) % 180  -90 #-90 à 90 if abs(ha) > 90 -> be the opposit
-    if ha == -90 : 
-        new_ha = 90
-    new_dec=dec 
-    if abs(ha) >= 90:
-        new_dec = (180- dec % 360) % 360 #if new_ha is the opposit -> new_dec need to be mirror
-    return new_ha, new_dec
-
-def rising_setting_time(CB):
-    """
-    Returns the next rise time (UTC) of a solar system body using Skyfield.
-    Default location: Sherbrooke, QC.
-    """
-  
-    # 
-
-    # Time window: now → +2 days
-    t0 = timeScale.now()
-    t1 = timeScale.utc(t0.utc_datetime() + timedelta(days=2))
-    localTZ =  timezone(timeZone)
-
-    # Build function for rise/transit/set
-    rising, bool_rise = almanac.find_risings(observer, CB, t0, t1)
-    setting, bool_set = almanac.find_settings(observer, CB,t0, t1)
-    rising  = rising[0].astimezone(localTZ)
-    setting = setting[0].astimezone(localTZ)
-    #print(f"  Rise : {rising}")
-    #print(f"  Set  : {setting}")
-    if rising == None or setting == None:
-        print('erreur de rise or set')
+    try:
+        normalized = str(value).replace("Z", "+00:00")
+        return int(datetime.fromisoformat(normalized).timestamp() * 1000)
+    except Exception:
         return None
-    
-    if rising>setting:
-        #is visible
-        return  rising, setting,True
-
-    return rising, setting,False #is not visible
-
-def above_altitude_predicate( CB, altitude_deg):
-    def predicate(t):
-        alt, az, dist = observer.at(t).observe(CB).apparent().altaz()
-        return alt.degrees > altitude_deg
-    predicate.step_days = 0.01
-    return predicate
 
 
-
-def rising_setting_above_alt( CB, altitude_deg ):
-    t0 = timeScale.now()
-    t1 = timeScale.utc(t0.utc_datetime() + timedelta(days=3))
-
-    predicate = above_altitude_predicate(CB, altitude_deg)
-    times, values = almanac.find_discrete(t0, t1, predicate)
-    #print(values)
-    # We want transitions:
-    #   False → True  = rises above altitude
-    #   True → False  = drops below altitude
-    
-    risingAboveAlt = None
-    settingAboveAlt = None
-    
-    for i in range(1, len(values)):
-        #print('i:',values[i])
-        if not values[i-1] and values[i]:
-            risingAboveAlt = times[i].astimezone(timezone(timeZone))
-            break
-    
-    for j in range(1, len(values)):
-        #print('j:',values[j])
-        if values[j-1] and not values[j]:
-            settingAboveAlt = times[j].astimezone(timezone(timeZone))
-            break
-
-    return risingAboveAlt, settingAboveAlt
-
-def print_visible_catalog():
-  
-    update_visible_catalog()
-    print("\nVisible catalog :")
-    for key in visibleCatalog.keys():
-        print("\n", key, ":")
-        for Body in visibleCatalog[key]:
-            
-            print("  -", Body['name'], " (", Body['icon'], ")")
-            print(f'rise :{Body['rising']}, 25:{Body['rising25']}, 45:{Body['rising45']}')
-            print(f'rise :{Body['setting']}, 25:{Body['setting25']}, 45:{Body['setting45']}')
-            print('alt:', observer.at(currentTime).observe(celestialBody[Body['name']]).apparent().altaz()[1])
-    print("\nTotal number of visible objects :", sum(len(visibleCatalog[key]) for key in visibleCatalog.keys()))
-
-#--------------------------------TELESCOPE CONTROLE FUNCTION--------------------------------------------------#
-def rotateXYtoHADEC(X,Y):
+class MotorLink:
     """
-        Rotate the movement in X,Y to HA/Dec changes based on the camera angle
-        Inputs: X, Y : movement in X and Y in degrees
-        Outputs: haChange, decChange : movement in HA/Dec based on the camera angle in degrees
+    Arduino serial bridge.
+    Incoming numeric responses:
+    - 0: rejected
+    - 1: accepted/moving
+    - 2: done/idle
     """
-    # Rotate the movement in X,Y to HA/Dec changes based on the camera angle
-    global raToMotor
-    global camAngle
-    X = 0
-    Y = 1
-    XYcam_TO_XYtelescope = np.array([[   np.cos(np.radians(camAngle)), np.sin(np.radians(camAngle))  ],
-                                     [  -np.sin(np.radians(camAngle)), np.cos(np.radians(camAngle))  ]])
-    XYtelescope = XYcam_TO_XYtelescope @ np.array([X, Y])
 
-    dec = XYtelescope[X]+ XYtelescope[Y]*(-np.sign(raToMotor)) #to verify
-    ha = XYtelescope[Y]*(-np.sign(raToMotor))*(-np.sign(XYtelescope[Y])) # to verify
-    #same sign if y is negative and opposite sign if y is positive, to verify
-  
+    def __init__(self, simulate=True, port="/dev/ttyUSB0", baudrate=115200):
+        self.simulate = bool(simulate)
+        self.port = port
+        self.baudrate = int(baudrate)
+        self.serial_conn = None
 
-    return ha, dec
+        self.lock = Lock()
+        self.shutdown = Event()
+        self.rx_thread = None
 
-def setupCameraAngle():
-    """
-        Setup the camera angle by moving the telescope in a known pattern and measuring the movement of the stars in the camera frame to calculate the angle of the camera
-        Inputs: None
-        Outputs: None (sets the global variable camAngle)
-    """
-    #not useful if we are unable to identify the movement of the stars
-    global decToMotor
-    global camAngle
+        self.last_error = ""
+        self.last_tx_at = 0.0
+        self.last_rx_at = 0.0
+        self.last_response = ""
+        self.last_debug_line = ""
+        self.system_state = "IDLE"
+        self.calibration_done = False
+        self.motor_state = {"RA": "IDLE", "DEC": "IDLE", "FOC": "IDLE"}
 
-    angleArray = []
-    for i in range(10):
-        CenterOfObjectXY = np.array([0,0]) # to replace with actual center of the object in the camera frame
-        ra,dec = moveManually(-1**i,0) # move in X
-        decToMotor += dec
-        #wait for the movement to be done and the camera to be stable
-        CenterOfObjectXY_afterMoveX = np.array([0,0]) # to replace with actual center of the object in the camera frame after moving in X
-        VectorMove = CenterOfObjectXY_afterMoveX - CenterOfObjectXY
-        try:
-            VectorAngle = np.degrees(np.arctan(VectorMove[1]/ VectorMove[0]))
-            angleArray.append((VectorAngle))
-        except ZeroDivisionError:
-            print("Error: Division by zero occurred while calculating vector angle.")
-    
-    meanAngle = np.mean(angleArray)
-    deviation = max(np.abs(angleArray-meanAngle))
-    if deviation > 5 or deviation == 0: # if the deviation is too high, we consider that the angle is not well defined
-        print("Angle measurement is not reliable, please check the setup")
-        return 0 # Return 0 to indicate that the angle is not reliable
-    camAngle = meanAngle
-    print(f"Camera angle set to {camAngle} degrees")
-    pass
+        self.pending_tx = deque(maxlen=200)
+        self.last_commands = deque(maxlen=300)
+        self.responses = deque(maxlen=300)
+        self.events = deque(maxlen=300)
+        self.sim_pending_done = deque(maxlen=100)
+        self.sim_steps = {"RA": 0.0, "DEC": 0.0, "FOC": 0.0}
 
-def recenterWithCamera(BodyCenterX, BodyCenterY):
-    """
-        Recenter the camera on the celestial body by calculating the movement needed in HA/Dec based on the position of the body in the camera frame
-        Inputs: BodyCenterX, BodyCenterY : coordinates of the center of the celestial body in the camera frame in pixels
-        Outputs: haChange, decChange : movement needed in HA/Dec to recenter the camera in degrees
-    """
-    CenteredZoneX = X_RESOLUTION*0.1 # Define a zone around the center of the camera where we consider the object to be centered
-    CenteredZoneY = Y_RESOLUTION*0.1
-    if abs(BodyCenterX-X_RESOLUTION/2) < CenteredZoneX and abs(BodyCenterY-Y_RESOLUTION/2) < CenteredZoneY:#to verify i##################
-        print("Object is already centered.")
-        return
-    else:
-        # Calculate the movement needed to recenter the object
-        moveX = PIXEL_TO_ANGLE_deg*(BodyCenterX - X_RESOLUTION/2)
-        moveY = PIXEL_TO_ANGLE_deg*(BodyCenterY - Y_RESOLUTION/2)
-        print(f"Moving camera to recenter object: moveX={moveX}, moveY={moveY}")
-        # Convert the movement in pixels to HA/Dec changes and update raToMotor and decToMotor accordingly
-        haChange, decChange = rotateXYtoHADEC(moveX, moveY)
-        return haChange, decChange
+        if not self.simulate and serial is not None:
+            try:
+                self.serial_conn = serial.Serial(self.port, self.baudrate, timeout=0.05, write_timeout=0.2)
+                self.rx_thread = Thread(target=self._rx_loop, daemon=True)
+                self.rx_thread.start()
+            except Exception as exc:
+                self.last_error = str(exc)
+                self.simulate = True
+        elif not self.simulate and serial is None:
+            self.last_error = "pyserial not installed. Falling back to simulation."
+            self.simulate = True
 
-def moveManually(inputX, inputY):
-    """
-        Move the telescope manually based on joystick input
-        Inputs: inputX, inputY : joystick inputs for X and Y movement (range should be defined, e.g. -1 to 1)
-        Outputs: haChange, decChange : movement in HA/Dec based on joystick input in degrees
-    """
-    # Security check for joystick input
-    if inputX > MAX_INPUT_FROM_JOYSTICK[1]:
-        inputX = MAX_INPUT_FROM_JOYSTICK[1]
-    elif inputX < MAX_INPUT_FROM_JOYSTICK[0]:
-        inputX = MAX_INPUT_FROM_JOYSTICK[0]
-    if inputY > MAX_INPUT_FROM_JOYSTICK[1]:
-        inputY = MAX_INPUT_FROM_JOYSTICK[1]
-    elif inputY < MAX_INPUT_FROM_JOYSTICK[0]:
-        inputY = MAX_INPUT_FROM_JOYSTICK[0]
+    def _build_cmd(self, action, motor=None, value="", value2=""):
+        parts = [str(int(action))]
+        if motor not in (None, ""):
+            parts.append(str(motor).upper())
+        if value != "":
+            parts.append(str(value))
+        if value2 != "":
+            parts.append(str(value2))
+        return ",".join(parts)
 
-    # Convert the joystick inputs to degrees of movement
-    moveX = (inputX / (MAX_INPUT_FROM_JOYSTICK[1] - MAX_INPUT_FROM_JOYSTICK[0])) * MANUAL_SPEED_MAX
-    moveY = (inputY / (MAX_INPUT_FROM_JOYSTICK[1] - MAX_INPUT_FROM_JOYSTICK[0])) * MANUAL_SPEED_MAX
+    def send_command(self, action, motor=None, value="", value2=""):
+        cmd = self._build_cmd(action, motor, value, value2)
+        return self.send_raw(cmd, action=action, motor=motor)
 
-    [ha,dec] = rotateXYtoHADEC(moveX, moveY)
-    return ha, dec
+    def send_raw(self, command, action=None, motor=None):
+        now = time.time()
+        meta = None
+        with self.lock:
+            meta = {
+                "ts": now,
+                "cmd": str(command),
+                "action": int(action) if action is not None else None,
+                "motor": str(motor).upper() if motor else None,
+            }
+            self.last_tx_at = now
+            self.pending_tx.append(meta)
+            self.last_commands.append(meta)
 
-def moveToTarget():
-    """
-        Move the telescope to the target celestial body based on the current state of the telescope
-        Inputs: stateOfTelescope : current state of the telescope (0: do nothing, 1: move to new target, 2: tracking with camera, 3: manual control)
-        Outputs: raToMotor, decToMotor : updated RA and Dec for the motors in degrees
-    """
-    # code for moving the camera each 2 sec
-    # case 1 : go to new taget
-    # case 2 : camera recentering
-    # case 3 : manual control
-    # case 0 : do nothing
-    now = time.monotonic()
-    global raToMotor, decToMotor
-    global stateOfTelescope 
-    targetCelestialBody = None #---francis---# replace with actual target celestial body
-    match stateOfTelescope:
-        case MOVEMENTSTATE.MISSION_TO_TARGET:
-            #redefine raToMotor and decToMotor to move to the new target
-            
-            tab, bodyInfo = catalog.findObjetByNameOrId(targetCelestialBody)
-            if bodyInfo is not None:
-                targetCelestialBody = celestialBody[bodyInfo['name']]
-                raToMotor, decToMotor = print_HaDec(targetCelestialBody)
+            if not self.simulate:
+                try:
+                    self.serial_conn.write((str(command) + "\n").encode("utf-8"))
+                    return True
+                except Exception as exc:
+                    self.last_error = str(exc)
+                    return False
 
-                if tab == 'tab-solar':
-                    stateOfTelescope = MOVEMENTSTATE.TRACKING_WITH_CAMERA
-                else:
-                    stateOfTelescope = 0
-
-            if targetCelestialBody is None:
-                print("Error: No target celestial body defined for MISSION_TO_TARGET state.")
-            
-            
-            stateOfTelescope = 0
-        case MOVEMENTSTATE.TRACKING_WITH_CAMERA:
-            if now >= next_updates['tracking']:
-                next_updates['tracking'] += INTERVALS['tracking']
-                BodyCenterX = 0 #---JP---# replace with actual X coordinate of the celestial body in the camera frame
-                BodyCenterY = 0 #---JP---# replace with actual Y coordinate of the celestial body in the camera frame
-                haChange, decChange = recenterWithCamera(BodyCenterX, BodyCenterY) * INTERVALS['tracking'] # multiply by the time interval to get the actual movement in degrees
-                raToMotor += haChange
-                decToMotor += decChange
-        case MOVEMENTSTATE.MANUAL_CONTROL:
-            if now >= next_updates['manual']:
-                next_updates['manual'] += INTERVALS['manual']
-                # get input from joystick
-                inputX = 0 #---francis---# replace with actual input
-                inputY = 0 #---francis---# replace with actual input
-                if abs(inputX) > 0.1 and abs(inputY) > 0.1: # out of the Dead zone for joystick input
-                    manualInput = moveManually(inputX, inputY) * INTERVALS['manual'] # multiply by the time interval to get the actual movement in degrees
-                    raToMotor += manualInput[0]
-                    decToMotor += manualInput[1]
-                
-            tab, bodyInfo = catalog.findObjetByNameOrId(targetCelestialBody)
-            if bodyInfo is not None:
-                targetCelestialBody = celestialBody[bodyInfo['name']]
-                
-
-                if tab == 'tab-solar':
-                    stateOfTelescope = MOVEMENTSTATE.TRACKING_WITH_CAMERA
-                else:
-                    stateOfTelescope = 0
-
-            if targetCelestialBody is None:
-                print("Error: No target celestial body defined for MISSION_TO_TARGET state.")
-        case _:
-            pass
-
-    # adding or ignoring the rotation of the earth in the calculations with trackingTarget
-    if compensateEarthrotation:
-        if now >= next_updates['earth_rotation']:
-            next_updates['earth_rotation'] += INTERVALS['earth_rotation']
-            raToMotor += EARTH_ROTATION_SPEED * INTERVALS['earth_rotation'] # add earth rotation to ra
-
-
-    print(f"Moving to RA: {raToMotor:.4f}°, Dec: {decToMotor:.4f}°")
-    return raToMotor, decToMotor
-
-#--------------------------     SETUP       --------------------------------------#
-
-def setup():
-    
-    #setup
-    print('setup...')
-    stateOfTelescope = 0
-    print('Setting up camera angle...')
-    setupCameraAngle()
-    print('Camera angle setup complete.')
-
-    print('Main loop...')
-
-    
-    i=0######
-
-#--------------------------     LOOP       --------------------------------------#
-
-def operator_loop():
-    while True:
-        # example operation prior to waiting, could call moveToTarget()
-        
-        now = time.monotonic()
-        
-        if now >= next_updates['variable_update']:
-            next_updates['variable_update'] += INTERVALS['variable_update']
-
-            #----------------------------UPDATE PARAMETERS----------------------------#
-            #look if old parameters have changed and update the state of the telescope accordingly
-
-            
-            #----------------------------UPDATE movement VARIABLES----------------------------#
-            '''
-            inputX = 0 #---francis---# replace with actual input
-            inputY = 0 #---francis---# replace with actual input
-            if abs(inputX) > 0.1 and abs(inputY) > 0.1: # out of the Dead zone for joystick input
-                stateOfTelescope = MOVEMENTSTATE.MANUAL_CONTROL
-
-            if francis.target != old_target: #---francis---# replace with actual check for new target availability
-                stateOfTelescope = MOVEMENTSTATE.MISSION_TO_TARGET
-                old_target = francis.target
-
-            if francis.gps != old_gps
-                update_postion()
-                old_gps = francis.gps
-
-            francis.t
-
-            if francis.tracking_with_camera==False and stateOfTelescope == MOVEMENTSTATE.TRACKING_WITH_CAMERA: #---francis---# replace with actual check for tracking with camera mode
-                stateOfTelescope = 0
-
-            if compensateEarthrotation == False:
-                #that's it, lol
-            '''
-            #----------------------------UPDATE MOVEMENT-----------------------------#
-            #calculate ra and dec
-            moveToTarget()
-
-            #verify ra and dec
-            if abs(raToMotor) > 100 or abs(decToMotor) > 160:
-                print("Warning: Movement exceeds telescope limits.")
-                #exit
-                break
-            """
-            if limit_switch_triggered(): #---simon---# replace with actual check for limit switch triggered
-                print("Warning: Limit switch triggered. Movement stopped to prevent damage.")
-                #exit
-                break
-            """
-            #send info to jp if > min ra or > min dec avaliable
-            if abs(raToMotor - lastRaToMotor) > RA_MINIMUM:
-                lastRaToMotor = raToMotor
-                #send raToMotor to JP for motor control
-                pass
-            
-            if abs(decToMotor - lastDecToMotor) > DEC_MINIMUM:
-                lastDecToMotor = decToMotor
-                #send decToMotor to JP for motor control
-                pass
-            
-            """
-                movement of the focus missing ...
-            """
-            #------------------------------EXIT CONDITION------------------------------#
-            #escape key to exit the loop
-            key = None
-            if msvcrt:
-                if msvcrt.kbhit():
-                    ch = msvcrt.getch()
+        if self.simulate:
+            self._on_response_line("1", meta_override=meta)
+            if meta["action"] in (1, 2, 3, 4, 0):
+                delay = 1.0 if meta["action"] in (3, 4) else 0.05
+                if meta["action"] in (1, 2) and meta.get("motor") in self.sim_steps:
                     try:
-                        key = ord(ch)
-                    except TypeError:
-                        # Python3 returns bytes; take first byte
-                        key = ch[0]
-            
-            if key in (27, ord('q')):  # ESC or 'q'
-                break
-            #------------------------------------test-----------------------------------#
-        if now >= next_updates['earth_rotation']:
-            print("Moving to target...")
-            next_updates['earth_rotation'] += INTERVALS['earth_rotation']
-            print(i)
-            i+=1
-            print_HaDec(celestialBody['JUPITER'], 'Jupiter') # to verify the movement of the telescope
-            
-            jupi = solarSystem['jupiter barycenter']
-            print_HaDec(jupi, 'Jupiter')
+                        parts = str(meta["cmd"]).split(",")
+                        target = float(parts[2])
+                    except Exception:
+                        target = float(self.sim_steps.get(meta["motor"], 0.0))
+                    start = float(self.sim_steps.get(meta["motor"], 0.0))
+                    distance = abs(target - start)
+                    if meta["action"] == 2 and len(str(meta["cmd"]).split(",")) >= 4:
+                        try:
+                            speed = max(1.0, abs(float(str(meta["cmd"]).split(",")[3])))
+                        except Exception:
+                            speed = 500.0
+                        delay = max(0.02, distance / speed)
+                    elif meta["action"] == 1:
+                        delay = max(0.02, distance / 1800.0)
+                    self.sim_steps[meta["motor"]] = target
+                with self.lock:
+                    self.sim_pending_done.append((now + delay, meta))
+            return True
 
-    time.sleep(0.0001)  # not overload CPU with a tight loop
-    pass
-    
+        return False
 
-# -------------------------------------------------------
-# MAIN
-# -------------------------------------------------------
-if __name__ == "__main__":
-    # setup()
-    # operator_loop()
-    rise,sett =rising_setting_above_alt(celestialBody['JUPITER'],0)
-    print(rise)
-    print(sett)
-    rising_setting_time(celestialBody['JUPITER'])
-    print_visible_catalog()
-    pass
+    def _rx_loop(self):
+        while not self.shutdown.is_set():
+            try:
+                line = self.serial_conn.readline().decode("utf-8", errors="replace").strip()
+            except Exception as exc:
+                with self.lock:
+                    self.last_error = str(exc)
+                time.sleep(0.05)
+                continue
+            if line:
+                self._on_response_line(line)
 
-        
+    def _apply_code(self, code, meta):
+        motor = (meta or {}).get("motor")
+        action = (meta or {}).get("action")
+        if code == 0:
+            if motor in self.motor_state:
+                self.motor_state[motor] = "ERROR"
+            self.system_state = "ERROR"
+            return
+        if code == 1:
+            if action in (3, 4):
+                self.system_state = "CALIBRATING"
+                self.calibration_done = False
+            elif motor in self.motor_state:
+                self.motor_state[motor] = "MOVING"
+                self.system_state = "MOVING"
+            return
+        if code == 2:
+            if action in (3, 4):
+                self.calibration_done = True
+                self.system_state = "READY"
+                self.motor_state = {"RA": "IDLE", "DEC": "IDLE", "FOC": "IDLE"}
+            elif motor in self.motor_state:
+                self.motor_state[motor] = "IDLE"
+                if all(v == "IDLE" for v in self.motor_state.values()):
+                    self.system_state = "READY"
+            else:
+                self.system_state = "READY"
 
-# -------------------------------------------------------#
-#setup order
-    # 1. jp with arduino code for motor
-    # 1. francis setup camera and server ()
+    def _on_response_line(self, line, meta_override=None):
+        now = time.time()
+        with self.lock:
+            self.last_rx_at = now
+            self.last_response = str(line)
+            code = None
+            try:
+                code = int(str(line).strip())
+            except Exception:
+                code = None
 
-    #2. simon with limit swich setup the motors
-    #2. francis and antoine update the catalog with 
+            if code in (0, 1, 2):
+                meta = meta_override or (self.pending_tx.popleft() if self.pending_tx else None)
+                ev = {
+                    "ts": now,
+                    "kind": "ack",
+                    "code": code,
+                    "line": str(line),
+                    "cmd": (meta or {}).get("cmd"),
+                    "action": (meta or {}).get("action"),
+                    "motor": (meta or {}).get("motor"),
+                }
+                self.responses.append(ev)
+                self.events.append(ev)
+                self._apply_code(code, meta)
+            else:
+                self.last_debug_line = str(line)
+                self.events.append({"ts": now, "kind": "debug", "line": str(line)})
 
-    #3. emile setup the focus looking at the night sky
+    def _flush_sim(self):
+        if not self.simulate:
+            return
+        now = time.time()
+        while self.sim_pending_done and self.sim_pending_done[0][0] <= now:
+            _, meta = self.sim_pending_done.popleft()
+            self._on_response_line("2", meta_override=meta)
 
-    #(4.) antoine setup the angle of the camera
+    def drain_events(self, limit=200):
+        self._flush_sim()
+        with self.lock:
+            amount = _clamp(int(limit), 1, 2000)
+            out = list(self.events)[-amount:]
+            self.events.clear()
+            return out
 
-    #(5-.) rotate the telescope to the side
-    #5. manually move the telescope to the polar star
-    #(5+.) replace the telescope on [0,0]
+    def status(self):
+        self._flush_sim()
+        with self.lock:
+            return {
+                "simulate": self.simulate,
+                "port": self.port,
+                "baudrate": self.baudrate,
+                "last_error": self.last_error,
+                "last_tx_at": self.last_tx_at,
+                "last_rx_at": self.last_rx_at,
+                "last_response": self.last_response,
+                "last_debug_line": self.last_debug_line,
+                "system_state": self.system_state,
+                "calibration_done": bool(self.calibration_done),
+                "motor_state": dict(self.motor_state),
+                "sim_steps": dict(self.sim_steps),
+                "last_commands": list(self.last_commands)[-20:],
+                "responses": list(self.responses)[-20:],
+            }
 
-    #6. start compensate earth rotataion
+    def close(self):
+        self.shutdown.set()
+        if self.rx_thread is not None and self.rx_thread.is_alive():
+            self.rx_thread.join(timeout=0.4)
+        if self.serial_conn is not None:
+            try:
+                self.serial_conn.close()
+            except Exception:
+                pass
 
-#loop:
-    #verify if the angle are more the the max
 
-        #looking for change in the parameter
-            #exposition time, gain, type of picture (planetary, deep sky, auto) -> change the camera setting
-            #compensate eart rotation on/off -> change the compensateEarthrotation variable
-        #looking for command for the type of movement
-            #MISSION_TO_TARGET
+class AstronomicOperator:
+    def __init__(
+        self,
+        base_catalog,
+        latitude=0.0,
+        longitude=0.0,
+        altitude_m=0.0,
+        data_root=".",
+        simulate_arduino=True,
+        arduino_port="/dev/ttyUSB0",
+        arduino_baudrate=115200,
+        ra_steps_per_degree=40.0,
+        dec_steps_per_degree=40.0,
+        focus_steps_total=10116.0,
+        fov_x_deg=1.2,
+        fov_y_deg=0.9,
+    ):
+        self.base_catalog = copy.deepcopy(base_catalog or {})
+        self.catalog_tabs = list(self.base_catalog.keys())
+        self.latitude = float(latitude or 0.0)
+        self.longitude = float(longitude or 0.0)
+        self.altitude_m = float(altitude_m or 0.0)
+        self.ra_steps_per_degree = float(ra_steps_per_degree)
+        self.dec_steps_per_degree = float(dec_steps_per_degree)
+        self.focus_steps_total = float(focus_steps_total)
+        self.fov_x_deg = float(fov_x_deg)
+        self.fov_y_deg = float(fov_y_deg)
 
-            #TRACKING_WITH_CAMERA
+        self._location_received = False
+        self._time_received = False
+        self._time_base_ms = None
+        self._time_sync_mono = None
 
-            #MANUAL_CONTROL
-        
-        #looking for change in the target, if change -> MISSION_TO_TARGET
-        #if TRACKING_WITH_CAMERA -> recenterWithCamera()
-        #looking for joystick input, if input -> MANUAL_CONTROL
-        
-        #looking if taking picture
-            #if planetary picture -> take picture with planetary setting
-            #if deep sky picture -> take picture with deep sky setting
+        self.skyfield_ready = False
+        self.time_scale = None
+        self.solar_system = None
+        self.earth = None
+        self.observer = None
+        self.stars = None
+        self.celestial_by_key = {}
 
-            #store picture with name and date in the adequate folder
+        self.focus_mode = "auto"
+        self.focus_manual_value = 50
+        self.focus_manual_ticks = 0.0
+        self.focus_best_step = 0.0
+        self.focus_current_step = 0.0
+        self.focus_target_step = 0.0
+
+        self.tracking_ra_offset_deg = 0.0
+        self.tracking_dec_offset_deg = 0.0
+        self.joystick_ra_offset_deg = 0.0
+        self.joystick_dec_offset_deg = 0.0
+        self.last_ra_step = 0
+        self.last_dec_step = 0
+        self.last_target_id = "STANDBY"
+        self.last_ha_deg = 0.0
+        self.last_dec_deg = 0.0
+        self.last_tick_at = 0.0
+        self.last_track_send_s = 0.0
+        self.last_focus_send_s = 0.0
+
+        self.hardware_ready = False
+        self.focus_ready = False
+        self.tracking_enabled = False
+        self.message = "Waiting for first GPS and time sync."
+        self.last_error = ""
+        self.lock = Lock()
+        self.ui_exchange = deque(maxlen=1000)
+
+        self.motor_link = MotorLink(
+            simulate=simulate_arduino,
+            port=arduino_port,
+            baudrate=arduino_baudrate,
+        )
+
+        self._init_skyfield(Path(data_root))
+        self._build_celestial_catalog()
+        self._update_observer()
+        self._refresh_message()
+
+    @property
+    def ready(self):
+        return bool(self._location_received and self._time_received)
+
+    def _init_skyfield(self, data_root):
+        if Loader is None:
+            self.message = "Skyfield unavailable."
+            self.last_error = "Skyfield not installed."
+            return
+        for root in (data_root / "skyfield-data", Path.home() / ".skyfield"):
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+                loader = Loader(str(root), expire=False)
+                self.time_scale = loader.timescale()
+                self.solar_system = loader("de421.bsp")
+                self.earth = self.solar_system["earth"]
+                try:
+                    with loader.open(hipparcos.URL) as handle:
+                        self.stars = hipparcos.load_dataframe(handle)
+                except Exception:
+                    self.stars = None
+                self.skyfield_ready = True
+                return
+            except Exception as exc:
+                self.last_error = str(exc)
+
+    def _build_celestial_catalog(self):
+        self.celestial_by_key = {}
+        if Star is None:
+            return
+        for tab_name, entries in self.base_catalog.items():
+            for item in entries:
+                oid = item.get("id")
+                name = str(item.get("name", oid or "")).upper()
+                obj = None
+                if tab_name == "tab-solar" and self.solar_system is not None:
+                    try:
+                        obj = self.solar_system[str(oid)]
+                    except Exception:
+                        try:
+                            obj = self.solar_system[str(oid) + " barycenter"]
+                        except Exception:
+                            obj = None
+                elif tab_name == "tab-stars" and self.stars is not None:
+                    try:
+                        obj = Star.from_dataframe(self.stars.loc[int(str(oid))])
+                    except Exception:
+                        obj = None
+                elif tab_name == "tab-deep":
+                    try:
+                        obj = Star(ra_hours=float(item.get("ra_hours")), dec_degrees=float(item.get("dec_degrees")))
+                    except Exception:
+                        obj = None
+                if obj is not None:
+                    if oid is not None:
+                        self.celestial_by_key[str(oid).upper()] = obj
+                    self.celestial_by_key[name] = obj
+
+    def _resolve_target(self, target_id):
+        return self.celestial_by_key.get(str(target_id or "").upper())
+
+    def _update_observer(self):
+        if self.earth is None or wgs84 is None:
+            self.observer = None
+        else:
+            self.observer = self.earth + wgs84.latlon(self.latitude, self.longitude, elevation_m=self.altitude_m)
+
+    def _refresh_message(self):
+        needs = []
+        if not self._location_received:
+            needs.append("GPS")
+        if not self._time_received:
+            needs.append("time/date")
+        self.message = "Astronomic operator ready." if not needs else ("Waiting for " + " and ".join(needs) + ".")
+
+    def _current_timestamp_ms(self):
+        if self._time_base_ms is None or self._time_sync_mono is None:
+            return int(time.time() * 1000)
+        elapsed = int((time.monotonic() - self._time_sync_mono) * 1000)
+        return int(self._time_base_ms + elapsed)
+
+    def _time_from_ms(self, timestamp_ms):
+        try:
+            return self.time_scale.utc(datetime.utcfromtimestamp(timestamp_ms / 1000.0))
+        except Exception:
+            return None
+
+    def set_location(self, latitude, longitude, altitude_m=0.0):
+        with self.lock:
+            self.latitude = float(latitude or 0.0)
+            self.longitude = float(longitude or 0.0)
+            self.altitude_m = float(altitude_m or 0.0)
+            self._location_received = True
+            self._update_observer()
+            self._refresh_message()
+
+    def updateLocation(self, lat, lon):
+        self.set_location(lat, lon, self.altitude_m)
+
+    def set_time(self, timestamp_ms=None, datetime_value=None):
+        with self.lock:
+            parsed = None
+            if timestamp_ms is not None:
+                try:
+                    parsed = int(float(timestamp_ms))
+                except Exception:
+                    parsed = None
+            if parsed is None:
+                parsed = _parse_datetime_to_ms(datetime_value)
+            self._time_base_ms = int(parsed if parsed is not None else (time.time() * 1000))
+            self._time_sync_mono = time.monotonic()
+            self._time_received = True
+            self._refresh_message()
+
+    def set_command_gates(self, hardware_ready, focus_ready, tracking_enabled):
+        with self.lock:
+            self.hardware_ready = bool(hardware_ready)
+            self.focus_ready = bool(focus_ready)
+            self.tracking_enabled = bool(tracking_enabled)
+
+    def on_ui_packet(self, direction, packet, meta=None):
+        with self.lock:
+            self.ui_exchange.append(
+                {
+                    "ts": datetime.utcnow().replace(microsecond=0).isoformat(),
+                    "direction": str(direction or "unknown"),
+                    "type": str((packet or {}).get("type", "UNKNOWN")),
+                    "meta": copy.deepcopy(meta or {}),
+                    "packet": copy.deepcopy(packet or {}),
+                }
+            )
+
+    def set_tracking_error(self, dx, dy, frame_width, frame_height):
+        with self.lock:
+            w = max(1, int(frame_width or 1))
+            h = max(1, int(frame_height or 1))
+            self.tracking_ra_offset_deg = (float(dx or 0.0) / float(w)) * self.fov_x_deg
+            self.tracking_dec_offset_deg = (-float(dy or 0.0) / float(h)) * self.fov_y_deg
+
+    def set_focus_info(self, mode, manual_value, best_step, current_step, manual_ticks=None):
+        with self.lock:
+            if mode in {"auto", "manual"}:
+                self.focus_mode = mode
+            self.focus_manual_value = _clamp(int(manual_value or 0), 0, 100)
+            if manual_ticks is None:
+                self.focus_manual_ticks = (self.focus_manual_value / 100.0) * self.focus_steps_total
+            else:
+                self.focus_manual_ticks = _clamp(float(manual_ticks), 0.0, self.focus_steps_total)
+            self.focus_best_step = float(best_step or 0.0)
+            self.focus_current_step = float(current_step or 0.0)
+            self.focus_target_step = self.focus_best_step if self.focus_mode == "auto" else self.focus_manual_ticks
+
+    @staticmethod
+    def new_ha_dec(ha, dec):
+        new_ha = (ha % 360.0 - 90.0) % 180.0 - 90.0
+        if ha == -90:
+            new_ha = 90.0
+        new_dec = dec
+        if abs(ha) >= 90.0:
+            new_dec = (180.0 - dec % 360.0) % 360.0
+        return new_ha, new_dec
+
+    def _target_hadec(self, target_id, timestamp_ms):
+        obj = self._resolve_target(target_id)
+        if obj is None or self.observer is None or self.time_scale is None:
+            return None
+        t_now = self._time_from_ms(timestamp_ms)
+        if t_now is None:
+            return None
+        try:
+            ha, dec, _ = self.observer.at(t_now).observe(obj).apparent().hadec()
+            return float(ha.degrees), float(dec.degrees)
+        except Exception:
+            return None
+
+    def compute_visible_catalog(self, timestamp_ms=None):
+        with self.lock:
+            if not self.ready or not self.skyfield_ready or self.observer is None:
+                return {tab: [] for tab in self.catalog_tabs}, 15.0
+            ts_ms = int(timestamp_ms if timestamp_ms is not None else self._current_timestamp_ms())
+            t_now = self._time_from_ms(ts_ms)
+            if t_now is None:
+                return {tab: [] for tab in self.catalog_tabs}, 15.0
+            out = {tab: [] for tab in self.catalog_tabs}
+            for tab_name, entries in self.base_catalog.items():
+                for raw in entries:
+                    obj = self._resolve_target(raw.get("id")) or self._resolve_target(raw.get("name"))
+                    if obj is None:
+                        continue
+                    try:
+                        alt, _, _ = self.observer.at(t_now).observe(obj).apparent().altaz()
+                    except Exception:
+                        continue
+                    if float(alt.degrees) >= 0:
+                        row = copy.deepcopy(raw)
+                        row["altitude_deg"] = round(float(alt.degrees), 2)
+                        out[tab_name].append(row)
+                out[tab_name].sort(key=lambda x: float(x.get("altitude_deg", -999.0)), reverse=True)
+            return out, 30.0
+
+    def tick(self, shared_data):
+        with self.lock:
+            now = time.monotonic()
+            dt = 0.04 if self.last_tick_at <= 0 else _clamp(now - self.last_tick_at, 0.001, 0.25)
+            self.last_tick_at = now
+            if not self.ready:
+                return
+
+            joy = dict((shared_data or {}).get("joystick", {}))
+            jx = float(joy.get("x", 0.0) or 0.0)
+            jy = float(joy.get("y", 0.0) or 0.0)
+            self.joystick_ra_offset_deg = _clamp(self.joystick_ra_offset_deg + (jx * 0.7 * dt), -12.0, 12.0)
+            self.joystick_dec_offset_deg = _clamp(self.joystick_dec_offset_deg + ((-jy) * 0.7 * dt), -12.0, 12.0)
+
+            self.focus_target_step = self.focus_best_step if self.focus_mode == "auto" else self.focus_manual_ticks
+            if self.hardware_ready and self.focus_ready and (now - self.last_focus_send_s) >= 0.08:
+                self.motor_link.send_command(1, "FOC", int(round(self.focus_target_step)))
+                self.last_focus_send_s = now
+
+            if not self.tracking_enabled:
+                return
+
+            mission = dict((shared_data or {}).get("mission", {}))
+            target_id = mission.get("target", "STANDBY")
+            if str(target_id).upper() == "STANDBY":
+                return
+            ts_ms = int((shared_data or {}).get("timestamp") or self._current_timestamp_ms())
+            hadec = self._target_hadec(target_id, ts_ms)
+            if hadec is None:
+                return
+
+            ha_deg, dec_deg = self.new_ha_dec(*hadec)
+            motor_flags = dict((shared_data or {}).get("motor", {}))
+            if bool(motor_flags.get("tracking_with_camera", True)):
+                ha_deg += self.tracking_ra_offset_deg
+                dec_deg += self.tracking_dec_offset_deg
+
+            ha_deg += self.joystick_ra_offset_deg
+            dec_deg += self.joystick_dec_offset_deg
+            ha_deg = _clamp(ha_deg, -90.0, 90.0)
+            dec_deg = _clamp(dec_deg, -180.0, 180.0)
+
+            self.last_target_id = str(target_id)
+            self.last_ha_deg = ha_deg
+            self.last_dec_deg = dec_deg
+            self.last_ra_step = int(round(ha_deg * self.ra_steps_per_degree))
+            self.last_dec_step = int(round(dec_deg * self.dec_steps_per_degree))
+
+            if (now - self.last_track_send_s) >= 0.04:
+                self.motor_link.send_command(1, "RA", self.last_ra_step)
+                self.motor_link.send_command(1, "DEC", self.last_dec_step)
+                self.last_track_send_s = now
+
+    def print_HaDec(self, cb, name=""):
+        if cb is None:
+            return None, None
+        t_now = self._time_from_ms(self._current_timestamp_ms())
+        if t_now is None or self.observer is None:
+            return None, None
+        try:
+            ha, dec, _ = self.observer.at(t_now).observe(cb).apparent().hadec()
+            return self.new_ha_dec(float(ha.degrees), float(dec.degrees))
+        except Exception:
+            return None, None
+
+    def rising_setting_time(self, cb):
+        if cb is None or almanac is None or self.time_scale is None or self.observer is None:
+            return None, None, False
+        try:
+            t0 = self.time_scale.now()
+            t1 = self.time_scale.utc(t0.utc_datetime() + timedelta(days=2))
+            rising, _ = almanac.find_risings(self.observer, cb, t0, t1)
+            setting, _ = almanac.find_settings(self.observer, cb, t0, t1)
+            if len(rising) == 0 or len(setting) == 0:
+                return None, None, False
+            rise = rising[0].utc_datetime()
+            set_ = setting[0].utc_datetime()
+            return rise, set_, bool(rise > set_)
+        except Exception:
+            return None, None, False
+
+    def rising_setting_above_alt(self, cb, altitude_deg):
+        if cb is None or almanac is None or self.time_scale is None or self.observer is None:
+            return None, None
+
+        def predicate(t):
+            alt, _, _ = self.observer.at(t).observe(cb).apparent().altaz()
+            return alt.degrees > float(altitude_deg)
+
+        predicate.step_days = 0.01
+        try:
+            t0 = self.time_scale.now()
+            t1 = self.time_scale.utc(t0.utc_datetime() + timedelta(days=3))
+            times, values = almanac.find_discrete(t0, t1, predicate)
+            rise = None
+            set_ = None
+            for i in range(1, len(values)):
+                if not values[i - 1] and values[i]:
+                    rise = times[i].utc_datetime()
+                    break
+            for i in range(1, len(values)):
+                if values[i - 1] and not values[i]:
+                    set_ = times[i].utc_datetime()
+                    break
+            return rise, set_
+        except Exception:
+            return None, None
+
+    def print_visible_catalog(self):
+        catalog, _ = self.compute_visible_catalog(timestamp_ms=self._current_timestamp_ms())
+        return catalog
+
+    def status(self):
+        with self.lock:
+            return {
+                "ready": self.ready,
+                "time_synced": bool(self._time_received),
+                "has_location": bool(self._location_received),
+                "skyfield_ready": bool(self.skyfield_ready),
+                "message": self.message,
+                "last_error": self.last_error,
+                "target": {
+                    "id": self.last_target_id,
+                    "ha_deg": round(float(self.last_ha_deg), 6),
+                    "dec_deg": round(float(self.last_dec_deg), 6),
+                    "ra_step": int(self.last_ra_step),
+                    "dec_step": int(self.last_dec_step),
+                },
+                "focus": {
+                    "mode": self.focus_mode,
+                    "manual_value": int(self.focus_manual_value),
+                    "manual_ticks": round(float(self.focus_manual_ticks), 2),
+                    "best_step": round(float(self.focus_best_step), 2),
+                    "current_step": round(float(self.focus_current_step), 2),
+                    "target_step": round(float(self.focus_target_step), 2),
+                    "range_ticks": round(float(self.focus_steps_total), 2),
+                },
+                "tracking": {
+                    "ra_offset_deg": round(float(self.tracking_ra_offset_deg), 6),
+                    "dec_offset_deg": round(float(self.tracking_dec_offset_deg), 6),
+                    "joy_ra_offset_deg": round(float(self.joystick_ra_offset_deg), 6),
+                    "joy_dec_offset_deg": round(float(self.joystick_dec_offset_deg), 6),
+                },
+                "gates": {
+                    "hardware_ready": bool(self.hardware_ready),
+                    "focus_ready": bool(self.focus_ready),
+                    "tracking_enabled": bool(self.tracking_enabled),
+                },
+                "motor_link": self.motor_link.status(),
+                "ui_exchange_size": len(self.ui_exchange),
+                "last_tick_at": self.last_tick_at,
+            }
+
+    def close(self):
+        self.motor_link.close()

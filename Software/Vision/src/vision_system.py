@@ -5,11 +5,15 @@ import time
 import threading
 import queue
 import serial
+try:
+    from serial.tools import list_ports
+except Exception:
+    list_ports = None
 
 # ==========================================
 # SYSTEM CONSTANTS
 # ==========================================
-TOTAL_MOTOR_STEPS = 2000.0  # Total physical steps of the sweep range
+TOTAL_MOTOR_STEPS = 10116  # Total physical steps of the sweep range
 VIDEO_WIDTH = 640
 VIDEO_HEIGHT = 480
 UI_HEIGHT = 150
@@ -149,6 +153,24 @@ class AutofocusAnalyzer:
     def reset(self):
         self.data =[]
 
+    def analyze_timed_sweep(self, pass_number, start_step, target_step, start_time, end_time):
+        """
+        Convert (timestamp, focus_score) samples to estimated motor steps using the measured
+        sweep duration, then reuse the standard pass analysis.
+        """
+        duration = max(1e-3, float(end_time) - float(start_time))
+        distance = float(target_step) - float(start_step)
+
+        converted = []
+        for ts, score in self.data:
+            ratio = (float(ts) - float(start_time)) / duration
+            ratio = max(0.0, min(1.0, ratio))
+            est_step = float(start_step) + (distance * ratio)
+            converted.append((est_step, score))
+
+        self.data = converted
+        return self.analyze_sweep(pass_number), duration
+
 # ==========================================
 # 3. HARDWARE CONTROLLER (DUAL PID PHYSICS)
 # ==========================================
@@ -169,7 +191,7 @@ class PID:
         return max(-self.out_max, min(self.out_max, output))
 
 class ArduinoController:
-    def __init__(self, simulate=False, port='/dev/ttyUSB0', baudrate=115200):
+    def __init__(self, simulate=False, port='auto', baudrate=115200):
         self.simulate = simulate
         self.cmd_queue = queue.Queue()
         self.response_queue = queue.Queue()
@@ -190,6 +212,8 @@ class ArduinoController:
         self.vel_pid = PID(kp=3.0, ki=0.5, kd=0.05, out_max=2000.0) 
 
         if not self.simulate:
+            if port in (None, "", "auto"):
+                port = self._detect_port()
             try:
                 self.ser = serial.Serial(port, baudrate, timeout=1)
             except Exception as e:
@@ -198,6 +222,22 @@ class ArduinoController:
 
         self.thread = threading.Thread(target=self._worker, daemon=True)
         self.thread.start()
+
+    def _detect_port(self):
+        if list_ports is None:
+            return '/dev/ttyUSB0'
+        ports = list(list_ports.comports())
+        if not ports:
+            return '/dev/ttyUSB0'
+        def score(p):
+            text = " ".join([str(p.device), str(p.description), str(p.hwid)]).lower()
+            s = 0
+            if "arduino" in text: s += 20
+            if "ch340" in text or "wch" in text: s += 15
+            if "usb serial" in text or "ttyusb" in text or "ttyacm" in text: s += 10
+            if str(p.device).upper().startswith("COM"): s += 5
+            return s
+        return sorted(ports, key=score, reverse=True)[0].device
 
     def get_current_position(self):
         return self.current_pos
@@ -237,14 +277,16 @@ class ArduinoController:
                         self.pos_pid.integral = 0
                         self.vel_pid.integral = 0
                         self.state = "PID_MOVE"
+                        self.response_queue.put("1")  # accepted
                         
                     elif action == 2:
-                        # Cmd 2: Sweep at Constant Speed to Endpoint (Uses Speed PID)
-                        self.target_speed = float(parts[2])
-                        self.target_pos = float(parts[3])
+                        # Cmd 2 (refactored protocol): 2,FOC,<target_ticks>,<ticks_per_second>
+                        self.target_pos = float(parts[2])
+                        self.target_speed = float(parts[3])
                         self.start_pos = self.current_pos
                         self.vel_pid.integral = 0
                         self.state = "SWEEP_MOVE"
+                        self.response_queue.put("1")  # accepted
                 else:
                     self.ser.write((cmd + '\n').encode('utf-8'))
 
@@ -267,8 +309,8 @@ class ArduinoController:
                         self.current_pos = self.target_pos
                         self.current_vel = 0.0
                         self.state = "IDLE"
-                        self.response_queue.put("1")
-                        print("[Arduino RX - SIM] 1")
+                        self.response_queue.put("2")
+                        print("[Arduino RX - SIM] 2")
 
                 elif self.state == "SWEEP_MOVE":
                     direction = 1 if self.target_pos > self.start_pos else -1
@@ -287,12 +329,12 @@ class ArduinoController:
                         self.current_pos = self.target_pos
                         self.current_vel = 0.0
                         self.state = "IDLE"
-                        self.response_queue.put("1")
-                        print("[Arduino RX - SIM] 1")
+                        self.response_queue.put("2")
+                        print("[Arduino RX - SIM] 2")
                         
             if not self.simulate and self.ser.in_waiting > 0:
                 response = self.ser.readline().decode('utf-8').strip()
-                if response in ["0", "1"]:
+                if response in ["0", "1", "2"]:
                     self.response_queue.put(response)
                     print(f"[Arduino RX] {response}")
                     
@@ -350,14 +392,17 @@ def main(simulate_video, simulate_arduino, video_source):
     
     # PASS STRUCTURE: (Start_Pos, Target_Pos, Target_Speed)
     sweep_passes =[
-        (0.0, TOTAL_MOTOR_STEPS, 400.0), # Sweep 1: Scan entire range
-        (0.0, 0.0, 150.0),               # Sweep 2: Dynamic
-        (0.0, 0.0, 50.0)                 # Sweep 3: Dynamic
+        (0.0, TOTAL_MOTOR_STEPS, 1000.0), # Sweep 1: Scan entire range
+        (0.0, 0.0, 600.0),               # Sweep 2: Dynamic
+        (0.0, 0.0, 350.0)                 # Sweep 3: Dynamic
     ] 
     
     current_pass_idx = 0
     next_sweep_range = (0, 0)
     best_focus_step = 0.0
+    sweep_start_time = 0.0
+    sweep_start_step = 0.0
+    sweep_target_step = 0.0
 
     print("\nStarting Vision System...")
 
@@ -390,7 +435,7 @@ def main(simulate_video, simulate_arduino, video_source):
             state = "WAIT_REWIND"
             
         elif state == "WAIT_REWIND":
-            if arduino.check_response() == "1":
+            if arduino.check_response() == "2":
                 state = "START_SWEEP"
 
         elif state == "START_SWEEP":
@@ -404,16 +449,33 @@ def main(simulate_video, simulate_arduino, video_source):
             while arduino.check_response() is not None: pass
             
             # CMD 2: Sweep using Speed PID (Speed, Endpoint)
-            arduino.send_command(2, "FOC", float(pass_speed), int(round(pass_target)))
+#            arduino.send_command(2, "FOC", int(round(pass_target)), float(pass_speed))
             
             analyzer.reset()
+            sweep_start_time = time.monotonic()
+            sweep_start_step = float(pass_start)
+            sweep_target_step = float(pass_target)
             state = "SWEEPING"
 
         elif state == "SWEEPING":
-            analyzer.add_data_point(current_step, focus_score)
+            # Store focus by timestamp; map to step at end using measured sweep time.
+            analyzer.add_data_point(time.monotonic(), focus_score)
             
-            if arduino.check_response() == "1":
-                result_best, result_range = analyzer.analyze_sweep(current_pass_idx + 1)
+            if arduino.check_response() == "2":
+                sweep_end_time = time.monotonic()
+                (result_best, result_range), measured_duration = analyzer.analyze_timed_sweep(
+                    current_pass_idx + 1,
+                    sweep_start_step,
+                    sweep_target_step,
+                    sweep_start_time,
+                    sweep_end_time,
+                )
+                measured_speed = abs(sweep_target_step - sweep_start_step) / max(measured_duration, 1e-3)
+                print(
+                    f"Sweep telemetry: duration={measured_duration:.3f}s, "
+                    f"measured_speed={measured_speed:.2f} ticks/s, "
+                    f"samples={len(analyzer.data)}"
+                )
                 
                 if result_best is not None:
                     print(f"Pass {current_pass_idx + 1} complete. Best step: {result_best:.2f}\n")
@@ -443,7 +505,7 @@ def main(simulate_video, simulate_arduino, video_source):
             state = "WAIT_LOCK"
 
         elif state == "WAIT_LOCK":
-            if arduino.check_response() == "1":
+            if arduino.check_response() == "2":
                 state = "TRACKING"
 
         # --- TRACKING / CENTERING LOGIC ---

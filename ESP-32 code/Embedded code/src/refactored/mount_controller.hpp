@@ -125,10 +125,18 @@ class MountController {
    * Monitors self-test progress and determines pass/fail.
    */
   void updateMotionSelfTest(unsigned long nowMs);
+  void updateCalibrationLaunch(unsigned long nowMs);
+  void cancelCalibrationLaunch();
 
   /**
-   * @brief Request parallel calibration of all motors.
-   * All three motors calibrate simultaneously in parallel.
+   * @brief Request staged "parallel" calibration start.
+   * 
+   * Launch order:
+   * 1) RA starts immediately
+   * 2) DEC starts after configurable delay
+   * 3) FOC starts after another configurable delay
+   * 
+   * Once started, each motor runs its own non-blocking calibration state machine.
    */
   void startParallelCalibration();
 
@@ -175,6 +183,7 @@ class MountController {
   bool m_debugFocusActive;                   ///< Focus debug mode active
   unsigned long m_debugStartMs;              ///< When debug started
   unsigned long m_lastDebugPrintMs;          ///< Last time debug info was printed
+  bool m_emitDoneWhenReady;                  ///< Emit serial code "2" once next time mount reaches READY
 
   /**
    * @brief Motion self-test state machine.
@@ -188,6 +197,18 @@ class MountController {
     unsigned long startMs;      ///< Test start timestamp
     unsigned long timeoutMs;    ///< Test timeout duration
   } m_selfTest;
+
+  /**
+   * @brief Staged calibration launcher state.
+   * 
+   * This does not perform calibration itself; it only schedules when each
+   * motor receives requestCalibration().
+   */
+  struct CalibrationLaunch {
+    bool active;                 ///< True while staged launch is in progress
+    uint8_t stage;               ///< 0=idle, 1=wait DEC, 2=wait FOC
+    unsigned long stageStartMs;  ///< Timestamp of current stage start
+  } m_calibrationLaunch;
 };
 
 }  // namespace refactored

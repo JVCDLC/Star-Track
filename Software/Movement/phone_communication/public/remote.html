@@ -253,6 +253,7 @@
             position: absolute;
             inset: var(--video-inset);
             object-fit: contain;
+            object-position: center center; /* Added */
             display: block;
             background: #000;
         }
@@ -536,10 +537,31 @@
             word-break: break-word;
         }
 
+        .target-btn .meta {
+            font-size: 0.72rem;
+            color: var(--muted);
+            letter-spacing: 0.04em;
+        }
+
         .target-btn.active {
             border-color: rgba(125, 255, 187, 0.42);
             background: rgba(125, 255, 187, 0.11);
             box-shadow: 0 0 0 1px rgba(125, 255, 187, 0.2);
+        }
+
+        .target-btn.alt-low {
+            border-color: rgba(255, 114, 92, 0.44);
+            background: rgba(255, 114, 92, 0.1);
+        }
+
+        .target-btn.alt-medium {
+            border-color: rgba(255, 211, 107, 0.45);
+            background: rgba(255, 211, 107, 0.12);
+        }
+
+        .target-btn.alt-high {
+            border-color: rgba(125, 255, 187, 0.45);
+            background: rgba(125, 255, 187, 0.12);
         }
 
         .two-col-grid {
@@ -969,7 +991,8 @@
             }
 
             .subtitle {
-                display: none;
+                display: block; /* none */
+                font-size: 0.6rem;
             }
 
             .bottom-rail {
@@ -1115,6 +1138,12 @@
                         <strong id="role-text">OBSERVER</strong>
                     </span>
                 </button>
+                <button class="status-pill static" id="init-pill" type="button">
+                    <span>
+                        <small>System</small><br>
+                        <strong id="init-text">INIT</strong>
+                    </span>
+                </button>
                 <button class="status-pill" id="top-sync-btn" type="button">
                     <span>
                         <small>Panel</small><br>
@@ -1163,7 +1192,8 @@
                             <span class="label" id="gps-label">GPS</span>
                             <strong id="gps-chip">0.0000 / 0.0000</strong>
                         </div>
-                        <div class="info-chip plain interactive" id="queue-chip-trigger" role="button" tabindex="0">
+                        <!--<div class="info-chip plain interactive" id="queue-chip-trigger" role="button" tabindex="0">-->
+                        <div class="info-chip interactive" id="queue-chip-trigger" role="button" tabindex="0">
                             <span class="label" id="queue-label">Queue</span>
                             <strong id="queue-chip">0</strong>
                         </div>
@@ -1331,12 +1361,13 @@
                     <div class="field focus-manual" id="focus-manual-group" style="margin-top:12px;">
                         <label for="focus-range">Manual focus</label>
                         <div class="range-row">
-                            <input id="focus-range" type="range" min="0" max="100" step="1">
-                            <input id="focus-input" type="number" min="0" max="100">
+                            <input id="focus-range" type="range" min="0" max="10116" step="1">
+                            <input id="focus-input" type="number" min="0" max="10116">
                         </div>
                     </div>
                     <div class="btn-row">
                         <button class="ghost-btn" type="button" id="apply-focus-btn">Apply Focus</button>
+                        <button class="ghost-btn" type="button" id="autofocus-btn">Recalibrate Auto Focus</button>
                     </div>
                 </div>
                 <div class="card">
@@ -1495,8 +1526,31 @@
                 timestamp: null,
                 camera: { exposure: 30000, gain: 150, type: "auto" },
                 motor: { tracking_with_camera: true, compensate_earth_rotation: true },
-                focus: { mode: "auto", manual_value: 50 },
-                capture: { video_duration: 10, last_photo_at: "", last_video_request_at: "", last_video_duration: 10 }
+                focus: { mode: "auto", manual_value: 50, manual_ticks: 0, range_ticks: 10116 },
+                capture: {
+                    video_duration: 10,
+                    last_photo_at: "",
+                    last_photo_path: "",
+                    last_video_request_at: "",
+                    last_video_duration: 10,
+                    last_video_path: "",
+                    recording: false,
+                    last_error: ""
+                },
+                vision_status: {
+                    ready: false,
+                    stage: "initializing",
+                    focus_score: 0,
+                    mode: "auto",
+                    manual_value: 50
+                },
+                system: {
+                    vision_ready: false,
+                    astronomic_ready: false,
+                    controls_ready: false,
+                    catalog_ready: false,
+                    message: "Waiting for initialization."
+                }
             },
             sysInfo: {
                 commander_queue: [],
@@ -1523,6 +1577,8 @@
             connStatus: document.getElementById("conn-status"),
             rolePill: document.getElementById("role-pill"),
             roleText: document.getElementById("role-text"),
+            initPill: document.getElementById("init-pill"),
+            initText: document.getElementById("init-text"),
             commanderText: document.getElementById("commander-text"),
             bellPill: document.getElementById("bell-pill"),
             bellCount: document.getElementById("bell-count"),
@@ -1684,9 +1740,16 @@
 
         function updateFocusUi() {
             const manualMode = el.focusModeSelect.value === "manual";
+            const controlsReady = Boolean(state.telemetry.system?.controls_ready);
             el.focusManualGroup.classList.toggle("hidden", !manualMode);
-            el.focusRange.disabled = !manualMode;
-            el.focusInput.disabled = !manualMode;
+            el.focusModeSelect.disabled = !controlsReady;
+            el.focusRange.disabled = !manualMode || !controlsReady;
+            el.focusInput.disabled = !manualMode || !controlsReady;
+            document.getElementById("apply-focus-btn").disabled = !controlsReady;
+            const autofocusBtn = document.getElementById("autofocus-btn");
+            if (autofocusBtn) {
+                autofocusBtn.disabled = !controlsReady;
+            }
         }
 
         function normalizeQueueEntries(entries) {
@@ -1816,6 +1879,13 @@
                 return;
             }
 
+            if (packet.type === "CATALOG_UPDATE") {
+                state.catalog = packet.catalog || {};
+                renderMissionTabs();
+                renderTargetGrid();
+                return;
+            }
+
             if (packet.type === "EMERGENCY_STOP") {
                 window.location.href = "/";
                 return;
@@ -1907,7 +1977,9 @@
                 camera: { ...state.telemetry.camera, ...(data.camera || {}) },
                 motor: { ...state.telemetry.motor, ...(data.motor || {}) },
                 focus: { ...state.telemetry.focus, ...(data.focus || {}) },
-                capture: { ...state.telemetry.capture, ...(data.capture || {}) }
+                capture: { ...state.telemetry.capture, ...(data.capture || {}) },
+                vision_status: { ...state.telemetry.vision_status, ...(data.vision_status || {}) },
+                system: { ...state.telemetry.system, ...(data.system || {}) }
             };
 
             if (data.timestamp) {
@@ -1958,8 +2030,18 @@
 
             const focus = state.telemetry.focus || {};
             syncSelectField(el.focusModeSelect, focus.mode || "auto");
-            syncInputField(el.focusRange, clampNumber(focus.manual_value ?? 50, 0, 100));
-            syncInputField(el.focusInput, focus.manual_value ?? 50);
+            const focusRangeTicks = clampNumber(
+                parseInt(focus.range_ticks ?? state.telemetry.vision_status?.focus_range_ticks ?? 10116, 10),
+                100,
+                200000
+            );
+            el.focusRange.max = String(focusRangeTicks);
+            el.focusInput.max = String(focusRangeTicks);
+            const displayTicks = (focus.mode || "auto") === "auto"
+                ? clampNumber(focus.best_step ?? focus.target_step ?? 0, 0, focusRangeTicks)
+                : clampNumber(focus.manual_ticks ?? 0, 0, focusRangeTicks);
+            syncInputField(el.focusRange, displayTicks);
+            syncInputField(el.focusInput, displayTicks);
             updateFocusUi();
         }
 
@@ -1989,10 +2071,29 @@
             const mission = state.telemetry.mission || {};
             el.targetChip.textContent = targetLabelForId(mission.target);
             el.actionChip.textContent = mission.action || "--";
+            renderInitializationState();
             applyStatusText();
             renderTargetGrid();
             updateInfoRibbonLayout();
             updateStatusRibbonLayout();
+        }
+
+        function renderInitializationState() {
+            const system = state.telemetry.system || {};
+            const ready = Boolean(system.controls_ready);
+            el.initText.textContent = ready ? "READY" : "INIT";
+            el.initPill.classList.toggle("active", !ready);
+            el.initPill.title = system.message || "";
+
+            const disabled = !ready;
+            [el.btnMission, el.btnCapture, el.btnJoystick].forEach((button) => {
+                if (!button) {
+                    return;
+                }
+                button.disabled = disabled;
+                button.classList.toggle("disabled", disabled);
+            });
+            updateFocusUi();
         }
 
         function updateInfoRibbonLayout() {
@@ -2002,15 +2103,17 @@
             if (!ribbon || !infoGroup) {
                 return;
             }
+            const forceStack = window.matchMedia("(orientation: portrait) and (max-width: 720px)").matches;
             ribbon.classList.remove("two-rows", "compact");
             const stopWidth = stopWrap ? stopWrap.offsetWidth : 0;
-            const available = Math.max(ribbon.clientWidth - stopWidth - 12, 0);
+            const reserved = forceStack ? 0 : stopWidth;
+            const available = Math.max(ribbon.clientWidth - reserved - 12, 0); // Comment previous line and: const available = Math.max(ribbon.clientWidth - stopWidth - 12, 0);
             const needsCompact = infoGroup.scrollWidth > available;
             if (needsCompact) {
                 ribbon.classList.add("compact");
             }
             const fits = ribbon.scrollWidth <= ribbon.clientWidth;
-            if (!fits) {
+            if (forceStack || !fits) { // (!fits)
                 ribbon.classList.add("two-rows");
             }
         }
@@ -2147,7 +2250,13 @@
 
         function renderMissionTabs() {
             const keys = Object.keys(state.catalog || {});
-            const missionKeys = keys.filter((key) => key !== "tab-misc");
+            const missionKeys = keys.filter((key) => {
+                if (key === "tab-misc") {
+                    return false;
+                }
+                const entries = state.catalog?.[key];
+                return Array.isArray(entries) && entries.length > 0;
+            });
             if (!missionKeys.includes("tab-misc")) {
                 missionKeys.push("tab-misc");
             }
@@ -2219,10 +2328,12 @@
             targets.forEach((target) => {
                 const button = document.createElement("button");
                 button.type = "button";
-                button.className = `target-btn${state.selectedTarget === target.id ? " active" : ""}`;
+                button.className = `target-btn ${visibilityClassForTarget(target)}${state.selectedTarget === target.id ? " active" : ""}`;
+                const altitude = formatAltitudeForTarget(target);
                 button.innerHTML = `
                     <span class="icon">${target.icon || "&bull;"}</span>
                     <span class="name">${target.name || target.id}</span>
+                    <span class="meta">${altitude}</span>
                 `;
                 button.addEventListener("click", () => sendMission(target.id));
                 el.targetGrid.appendChild(button);
@@ -2252,10 +2363,12 @@
             filtered.forEach((target) => {
                 const button = document.createElement("button");
                 button.type = "button";
-                button.className = `target-btn${state.selectedTarget === target.id ? " active" : ""}`;
+                button.className = `target-btn ${visibilityClassForTarget(target)}${state.selectedTarget === target.id ? " active" : ""}`;
+                const altitude = formatAltitudeForTarget(target);
                 button.innerHTML = `
                     <span class="icon">${target.icon || "&bull;"}</span>
                     <span class="name">${target.name || target.id}</span>
+                    <span class="meta">${altitude}</span>
                 `;
                 button.addEventListener("click", () => sendMission(target.id));
                 el.targetGrid.appendChild(button);
@@ -2271,6 +2384,28 @@
 
         function readableTabName(key) {
             return key.replace("tab-", "").replace("_", " ").toUpperCase();
+        }
+
+        function visibilityClassForTarget(target) {
+            const level = (target?.visibility_level || "").toLowerCase();
+            if (level === "high") {
+                return "alt-high";
+            }
+            if (level === "medium") {
+                return "alt-medium";
+            }
+            if (level === "low") {
+                return "alt-low";
+            }
+            return "";
+        }
+
+        function formatAltitudeForTarget(target) {
+            const altitude = Number(target?.altitude_deg);
+            if (Number.isFinite(altitude)) {
+                return `ALT ${altitude.toFixed(1)}°`;
+            }
+            return "ALT --";
         }
 
         function syncPendingApprovals(pendingRequests) {
@@ -2437,6 +2572,16 @@
             sendPacket({ type: "JOYSTICK_OWNER_TIME", delta });
         }
 
+        function controlsReadyForType(type) {
+            const allowedDuringInit = new Set(["GPS_UPDATE", "SYNC_CLOCK", "TIMESTAMP", "DATETIME", "EMERGENCY_STOP"]);
+            const ready = Boolean(state.telemetry.system?.controls_ready);
+            if (ready || allowedDuringInit.has(type)) {
+                return true;
+            }
+            showToast(state.telemetry.system?.message || "System is still initializing.");
+            return false;
+        }
+
         function sendMission(targetId) {
             const nextTarget = state.selectedTarget === targetId ? "STANDBY" : targetId;
             state.selectedTarget = nextTarget;
@@ -2454,6 +2599,10 @@
         }
 
         function sendOrRequest(payload, desc, options = {}) {
+            if (!controlsReadyForType(payload?.type)) {
+                return;
+            }
+
             const directRoles = options.allowBridge ? ["COMMANDER", "BRIDGE"] : ["COMMANDER"];
             if (directRoles.includes(state.myRole)) {
                 if (sendPacket(payload) && options.toast !== false) {
@@ -2772,20 +2921,31 @@
         }
 
         function sendFocusSettings() {
-            const manualValue = clampNumber(parseInt(el.focusInput.value, 10), 0, 100);
+            const rangeTicks = clampNumber(parseInt(el.focusRange.max, 10), 100, 200000);
+            const manualTicks = clampNumber(parseInt(el.focusInput.value, 10), 0, rangeTicks);
+            const manualValue = clampNumber(Math.round((manualTicks / rangeTicks) * 100), 0, 100);
             clearDirtyFields("focus-mode-select", "focus-range", "focus-input");
             sendOrRequest(
                 {
                     type: "FOCUS_SETTINGS",
                     data: {
                         mode: el.focusModeSelect.value,
-                        manual_value: manualValue
+                        manual_value: manualValue,
+                        manual_ticks: manualTicks
                     }
                 },
                 `Update focus settings to ${el.focusModeSelect.value}`,
                 { successMessage: "Focus settings sent." }
             );
             updateFocusUi();
+        }
+
+        function triggerAutofocusCalibration() {
+            sendOrRequest(
+                { type: "AUTOFOCUS_RECALIBRATE" },
+                "Start autofocus recalibration",
+                { successMessage: "Autofocus recalibration requested." }
+            );
         }
 
         function openSheet(id) {
@@ -3024,8 +3184,10 @@
             });
             document.getElementById("focus-input").addEventListener("input", () => {
                 markFieldsDirty("focus-range", "focus-input");
-                el.focusRange.value = clampNumber(parseInt(el.focusInput.value, 10), 0, 100);
+                const maxTicks = clampNumber(parseInt(el.focusRange.max, 10), 100, 200000);
+                el.focusRange.value = clampNumber(parseInt(el.focusInput.value, 10), 0, maxTicks);
             });
+            document.getElementById("autofocus-btn").addEventListener("click", triggerAutofocusCalibration);
 
             document.getElementById("send-joystick-request-btn").addEventListener("click", requestJoystickPrivilege);
             document.getElementById("release-joystick-btn").addEventListener("click", () => closeJoystickDock(true));

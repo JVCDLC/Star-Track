@@ -1,12 +1,16 @@
 import argparse
 import asyncio
+import copy
 import json
 import os
+import re
 import ssl
+import sys
 import threading
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -16,6 +20,21 @@ try:
     import zwoasi as asi
 except ImportError:
     asi = None
+try:
+    from serial.tools import list_ports
+except Exception:
+    list_ports = None
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+MOVEMENT_SRC_DIR = PROJECT_ROOT / "Software" / "Movement" / "src"
+if str(MOVEMENT_SRC_DIR) not in sys.path:
+    sys.path.append(str(MOVEMENT_SRC_DIR))
+
+try:
+    from astronomic_operator import AstronomicOperator
+except Exception as exc:
+    AstronomicOperator = None
+    print(f"Astronomic operator import failed: {exc}")
 
 
 SSL_CERT = "cert.pem"
@@ -25,6 +44,12 @@ VIDEO_WIDTH = 1280
 VIDEO_HEIGHT = 720
 JPEG_QUALITY = 60
 BRIDGE_PIN = "1234"
+CAPTURE_ROOT = Path("startrack_img")
+VISION_INIT_SECONDS = 8.0
+EXCHANGE_LOG_FILE = Path(__file__).resolve().parent / "exchange.log"
+EXCHANGE_LOG_LIMIT = 2000
+BACKGROUND_LOOP_INTERVAL_S = 0.05
+CALIBRATION_COMMAND_TIMEOUT_S = 45.0
 
 CATALOG = {
     "tab-solar": [
@@ -128,6 +153,14 @@ def clamp(value, low, high):
     return max(low, min(high, value))
 
 
+def _clamp_float(value, low, high):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        value = low
+    return max(float(low), min(float(high), value))
+
+
 def parse_datetime_to_ms(value):
     if not value:
         return None
@@ -136,6 +169,55 @@ def parse_datetime_to_ms(value):
         return int(datetime.fromisoformat(normalized).timestamp() * 1000)
     except (TypeError, ValueError):
         return None
+
+
+def sanitize_fs_name(value, fallback="UNKNOWN"):
+    text = str(value or "").strip()
+    if not text:
+        text = fallback
+    text = re.sub(r"[\\/:*?\"<>|]+", "_", text)
+    text = re.sub(r"\s+", "_", text)
+    return text[:64] or fallback
+
+
+def detect_arduino_port(default_port):
+    """
+    Detect a likely Arduino serial port across Linux/Windows/macOS.
+    Falls back to `default_port` if no suitable candidate is found.
+    """
+    if list_ports is None:
+        return default_port
+
+    try:
+        ports = list(list_ports.comports())
+    except Exception:
+        return default_port
+
+    if not ports:
+        return default_port
+
+    def _score(port_info):
+        text = " ".join(
+            [
+                str(getattr(port_info, "device", "")),
+                str(getattr(port_info, "description", "")),
+                str(getattr(port_info, "manufacturer", "")),
+                str(getattr(port_info, "hwid", "")),
+            ]
+        ).lower()
+        score = 0
+        if "arduino" in text:
+            score += 20
+        if "ch340" in text or "wch" in text:
+            score += 15
+        if "usb serial" in text or "ttyusb" in text or "ttyacm" in text:
+            score += 10
+        if str(getattr(port_info, "device", "")).upper().startswith("COM"):
+            score += 5
+        return score
+
+    best = sorted(ports, key=_score, reverse=True)[0]
+    return str(getattr(best, "device", default_port) or default_port)
 
 
 class SystemState:
@@ -158,6 +240,9 @@ class SystemState:
         now_ms = int(time.time() * 1000)
         self.clock_base_ms = now_ms
         self.clock_synced_at = time.monotonic()
+        self.clock_was_explicitly_synced = False
+        self.catalog = copy.deepcopy(CATALOG)
+        self.exchange_log = deque(maxlen=EXCHANGE_LOG_LIMIT)
 
         self.data = {
             "gps": {"lat": 0.0, "lon": 0.0, "alt": 0.0},
@@ -170,12 +255,56 @@ class SystemState:
                 "tracking_with_camera": True,
                 "compensate_earth_rotation": True,
             },
-            "focus": {"mode": "auto", "manual_value": 50},
+            "runtime_modes": {
+                "camera_mode": "hardware",
+                "simulate_arduino": False,
+            },
+            "focus": {"mode": "auto", "manual_value": 50, "manual_ticks": 5058},
             "capture": {
                 "video_duration": 10,
                 "last_photo_at": "",
+                "last_photo_path": "",
                 "last_video_request_at": "",
                 "last_video_duration": 10,
+                "last_video_path": "",
+                "recording": False,
+                "last_error": "",
+            },
+            "vision_status": {
+                "ready": False,
+                "stage": "initializing",
+                "focus_score": 0.0,
+                "mode": "auto",
+                "manual_value": 50,
+                "best_step": 0.0,
+                "current_step": 0.0,
+                "dx": 0.0,
+                "dy": 0.0,
+                "tracking_available": False,
+                "initialized_at": "",
+            },
+            "astronomic_status": {
+                "ready": False,
+                "time_synced": False,
+                "has_location": False,
+                "skyfield_ready": False,
+                "message": "Waiting for GPS and time sync.",
+            },
+            "arduino_status": {
+                "available": False,
+                "system_state": "UNKNOWN",
+                "calibration_done": False,
+                "last_response": "",
+                "last_debug_line": "",
+                "motor_state": {"RA": "UNKNOWN", "DEC": "UNKNOWN", "FOC": "UNKNOWN"},
+            },
+            "system": {
+                "hardware_calibrated": False,
+                "vision_ready": False,
+                "astronomic_ready": False,
+                "controls_ready": False,
+                "catalog_ready": False,
+                "message": "Waiting for initialization.",
             },
         }
 
@@ -257,6 +386,13 @@ class SystemState:
     def client_role(self, ws):
         client = self.clients.get(ws)
         return client["role"] if client else "OBSERVER"
+
+    def client_meta(self, ws):
+        return {
+            "client_id": self.client_id(ws),
+            "name": self.client_name(ws),
+            "role": self.client_role(ws),
+        }
 
     def is_commander(self, ws):
         return ws is not None and ws == self.commander_ws
@@ -385,11 +521,13 @@ class SystemState:
         self.joystick_queue = deque(entries)
         return updated
 
-    def sync_clock(self, timestamp_ms=None, datetime_value=None):
+    def sync_clock(self, timestamp_ms=None, datetime_value=None, explicit=False):
         derived_ms = parse_datetime_to_ms(datetime_value)
         effective_ms = timestamp_ms or derived_ms or int(time.time() * 1000)
         self.clock_base_ms = int(effective_ms)
         self.clock_synced_at = time.monotonic()
+        if explicit:
+            self.clock_was_explicitly_synced = True
         self.update_clock()
 
     def update_clock(self):
@@ -490,19 +628,396 @@ class SystemState:
             else [],
         }
 
+    def record_exchange(self, direction, payload, ws=None, delivered=True):
+        packet = payload if isinstance(payload, dict) else {"raw": str(payload)}
+        event = {
+            "ts": utc_now_iso(),
+            "direction": str(direction or "unknown"),
+            "type": packet.get("type", "UNKNOWN"),
+            "delivered": bool(delivered),
+            "client": self.client_meta(ws) if ws is not None else None,
+            "packet": copy.deepcopy(packet),
+        }
+        self.exchange_log.append(event)
+        try:
+            with EXCHANGE_LOG_FILE.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def exchange_snapshot(self, limit=200):
+        amount = clamp(int(limit), 1, EXCHANGE_LOG_LIMIT)
+        return list(self.exchange_log)[-amount:]
+
 
 state = SystemState()
+
+
+class VisionCoordinator:
+    TOTAL_FOCUS_STEPS = 10116.0
+
+    def __init__(self, init_seconds=VISION_INIT_SECONDS):
+        self.init_seconds = max(3.0, float(init_seconds))
+        self.active = False
+        self.ready = False
+        self.stage = "waiting_hardware_calibration"
+        self.initialized_at = ""
+        self.focus_score = 0.0
+        self.mode = state.data["focus"]["mode"]
+        self.manual_value = int(state.data["focus"]["manual_value"])
+        self.best_focus_score = -1.0
+        self.best_focus_step = 0.0
+        self.current_focus_step = 0.0
+        self.dx = 0.0
+        self.dy = 0.0
+        self.frame_width = VIDEO_WIDTH
+        self.frame_height = VIDEO_HEIGHT
+        self.tracking_available = False
+
+        # Autofocus sweep state
+        self.pass_speeds = [500.0, 250.0, 120.0]
+        self.pass_ranges = [
+            (0.0, self.TOTAL_FOCUS_STEPS),
+            (0.0, self.TOTAL_FOCUS_STEPS),
+            (0.0, self.TOTAL_FOCUS_STEPS),
+        ]
+        self.current_pass = 0
+        self.pending_focus_command = None
+        self.sweep_samples = []
+        self.sweep_started_at = 0.0
+        self.sweep_start_step = 0.0
+        self.sweep_target_step = 0.0
+        self.last_sweep_duration_s = 0.0
+        self.last_sweep_measured_speed = 0.0
+        self.last_sweep_sample_count = 0
+        self.last_focus_error = ""
+        self.autofocus_retry_count = 0
+
+    def _manual_to_step(self):
+        return (float(self.manual_value) / 100.0) * self.TOTAL_FOCUS_STEPS
+
+    def _update_tracking_error(self, frame):
+        if frame is None:
+            self.dx = 0.0
+            self.dy = 0.0
+            self.tracking_available = False
+            return
+
+        self.frame_height, self.frame_width = frame.shape[:2]
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            blurred = cv2.GaussianBlur(gray, (5, 5), 1.5)
+            _, mask = cv2.threshold(
+                blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+            )
+            kernel = np.ones((5, 5), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            if not contours:
+                self.dx = 0.0
+                self.dy = 0.0
+                self.tracking_available = False
+                return
+
+            largest = max(contours, key=cv2.contourArea)
+            (cx, cy), _ = cv2.minEnclosingCircle(largest)
+            center_x = int(cx)
+            center_y = int(cy)
+            self.dx = float((self.frame_width // 2) - center_x)
+            self.dy = float((self.frame_height // 2) - center_y)
+            self.tracking_available = True
+        except Exception:
+            self.dx = 0.0
+            self.dy = 0.0
+            self.tracking_available = False
+
+    def update_focus_settings(self, mode, manual_value):
+        if mode in {"auto", "manual"}:
+            self.mode = mode
+        try:
+            self.manual_value = clamp(int(manual_value), 0, 100)
+        except (TypeError, ValueError):
+            pass
+
+        if self.mode == "manual":
+            self.current_focus_step = self._manual_to_step()
+        elif self.ready:
+            self.current_focus_step = self.best_focus_step
+
+    def update_from_frame(self, frame):
+        self._update_tracking_error(frame)
+        if frame is not None:
+            try:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                self.focus_score = float(np.var(cv2.Laplacian(gray, cv2.CV_64F)))
+            except Exception:
+                self.focus_score = 0.0
+
+        # Collect focus score samples only while the sweep command is active.
+        if self.active and self.pending_focus_command == "SWEEP":
+            self.sweep_samples.append((time.monotonic(), float(self.focus_score)))
+
+        if not self.active:
+            self.stage = "waiting_hardware_calibration"
+            if self.mode == "manual":
+                self.current_focus_step = self._manual_to_step()
+
+    def start_focus_calibration(self):
+        self.active = True
+        self.ready = False
+        self.stage = "focus_prepare_pass_1"
+        self.initialized_at = ""
+        self.best_focus_score = -1.0
+        self.best_focus_step = 0.0
+        self.current_focus_step = 0.0
+        self.current_pass = 0
+        self.pending_focus_command = None
+        self.sweep_samples = []
+        self.sweep_started_at = 0.0
+        self.sweep_start_step = 0.0
+        self.sweep_target_step = 0.0
+        self.last_sweep_duration_s = 0.0
+        self.last_sweep_measured_speed = 0.0
+        self.last_sweep_sample_count = 0
+        self.last_focus_error = ""
+        self.autofocus_retry_count = 0
+        self.pass_ranges = [
+            (0.0, self.TOTAL_FOCUS_STEPS),
+            (0.0, self.TOTAL_FOCUS_STEPS),
+            (0.0, self.TOTAL_FOCUS_STEPS),
+        ]
+
+    def _set_next_pass_range(self, pass_index, best_step):
+        if pass_index == 0:
+            pad = 280.0
+        elif pass_index == 1:
+            pad = 90.0
+        else:
+            return
+        low = max(0.0, float(best_step) - pad)
+        high = min(self.TOTAL_FOCUS_STEPS, float(best_step) + pad)
+        self.pass_ranges[pass_index + 1] = (low, high)
+
+    def _send_focus_position(self, link, target_step, stage_name):
+        sent = link.send_command(1, "FOC", int(round(target_step)))
+        if sent:
+            self.pending_focus_command = "REWIND" if "rewind" in stage_name else "LOCK"
+            self.stage = stage_name
+            self.current_focus_step = float(target_step)
+        return sent
+
+    def _send_focus_sweep(self, link, start_step, target_step, speed):
+        sent = link.send_command(2, "FOC", int(round(target_step)), float(speed))
+        if sent:
+            self.pending_focus_command = "SWEEP"
+            self.stage = f"focus_sweep_pass_{self.current_pass + 1}"
+            self.sweep_samples = []
+            self.sweep_started_at = time.monotonic()
+            self.sweep_start_step = float(start_step)
+            self.sweep_target_step = float(target_step)
+            self.current_focus_step = float(start_step)
+        return sent
+
+    def _finalize_sweep(self):
+        ended_at = time.monotonic()
+        duration = max(0.001, ended_at - self.sweep_started_at)
+        self.last_sweep_duration_s = duration
+        distance = abs(self.sweep_target_step - self.sweep_start_step)
+        self.last_sweep_measured_speed = distance / duration
+
+        if not self.sweep_samples:
+            self.last_focus_error = "No focus samples captured during sweep."
+            return None
+
+        direction = 1.0 if self.sweep_target_step >= self.sweep_start_step else -1.0
+        best_step = self.sweep_start_step
+        best_score = -1.0
+
+        for sample_ts, score in self.sweep_samples:
+            ratio = _clamp_float((sample_ts - self.sweep_started_at) / duration, 0.0, 1.0)
+            estimated_step = self.sweep_start_step + direction * (self.last_sweep_measured_speed * duration * ratio)
+            if direction > 0:
+                estimated_step = min(self.sweep_target_step, max(self.sweep_start_step, estimated_step))
+            else:
+                estimated_step = max(self.sweep_target_step, min(self.sweep_start_step, estimated_step))
+
+            if score >= best_score:
+                best_score = score
+                best_step = estimated_step
+
+        self.last_sweep_sample_count = len(self.sweep_samples)
+        self.best_focus_score = max(self.best_focus_score, best_score)
+        self.best_focus_step = float(best_step)
+        self.current_focus_step = float(best_step)
+        return best_step
+
+    def handle_arduino_events(self, events, link):
+        if not self.active:
+            return
+
+        for event in events:
+            if event.get("kind") != "ack":
+                continue
+            if str(event.get("motor", "")).upper() != "FOC":
+                continue
+
+            code = event.get("code")
+            action = event.get("action")
+
+            # Focus command rejected by firmware -> retry a limited number of times.
+            if code == 0:
+                failed_command = self.pending_focus_command
+                self.autofocus_retry_count += 1
+                self.pending_focus_command = None
+                if self.autofocus_retry_count <= 3:
+                    if failed_command == "LOCK":
+                        self.stage = f"focus_lock_retry_{self.autofocus_retry_count}"
+                        self._send_focus_position(link, self.best_focus_step, "focus_lock_best")
+                    else:
+                        self.stage = f"focus_prepare_pass_{self.current_pass + 1}"
+                else:
+                    self.last_focus_error = "Focus command rejected repeatedly."
+                    self.stage = "focus_error"
+                    self.active = False
+                continue
+
+            if code != 2:
+                continue
+
+            # Done for rewind/start positioning.
+            if action == 1 and self.pending_focus_command == "REWIND":
+                self.autofocus_retry_count = 0
+                self.pending_focus_command = None
+                start_step, target_step = self.pass_ranges[self.current_pass]
+                speed = self.pass_speeds[self.current_pass]
+                self._send_focus_sweep(link, start_step, target_step, speed)
+                continue
+
+            # Done for sweep move.
+            if action == 2 and self.pending_focus_command == "SWEEP":
+                self.autofocus_retry_count = 0
+                self.pending_focus_command = None
+                best_step = self._finalize_sweep()
+                if best_step is None:
+                    self.stage = "focus_error"
+                    self.active = False
+                    continue
+
+                if self.current_pass < 2:
+                    self._set_next_pass_range(self.current_pass, best_step)
+                    self.current_pass += 1
+                    self.stage = f"focus_prepare_pass_{self.current_pass + 1}"
+                else:
+                    self._send_focus_position(link, best_step, "focus_lock_best")
+                continue
+
+            # Done for final lock.
+            if action == 1 and self.pending_focus_command == "LOCK":
+                self.autofocus_retry_count = 0
+                self.pending_focus_command = None
+                self.ready = True
+                self.stage = "tracking"
+                self.active = True
+                self.initialized_at = utc_now_iso()
+                if self.mode == "auto":
+                    self.current_focus_step = self.best_focus_step
+                else:
+                    self.current_focus_step = self._manual_to_step()
+
+    def tick_autofocus(self, link):
+        if not self.active or self.ready or self.pending_focus_command is not None:
+            return
+
+        if self.current_pass >= len(self.pass_ranges):
+            return
+
+        if self.stage.startswith("focus_prepare_pass_"):
+            start_step, _ = self.pass_ranges[self.current_pass]
+            self._send_focus_position(
+                link,
+                start_step,
+                f"focus_rewind_pass_{self.current_pass + 1}",
+            )
+
+    def to_payload(self):
+        return {
+            "active": bool(self.active),
+            "ready": self.ready,
+            "stage": self.stage,
+            "focus_score": round(float(self.focus_score), 2),
+            "mode": self.mode,
+            "manual_value": self.manual_value,
+            "best_step": round(float(self.best_focus_step), 2),
+            "current_step": round(float(self.current_focus_step), 2),
+            "dx": round(float(self.dx), 2),
+            "dy": round(float(self.dy), 2),
+            "tracking_available": bool(self.tracking_available),
+            "frame_width": int(self.frame_width),
+            "frame_height": int(self.frame_height),
+            "initialized_at": self.initialized_at,
+            "pass_index": int(self.current_pass + 1),
+            "sweep_duration_s": round(float(self.last_sweep_duration_s), 4),
+            "sweep_speed_ticks_per_s": round(float(self.last_sweep_measured_speed), 3),
+            "sweep_samples": int(self.last_sweep_sample_count),
+            "last_error": self.last_focus_error,
+            "focus_range_ticks": int(self.TOTAL_FOCUS_STEPS),
+        }
+
+
+def build_capture_paths(target_id, capture_kind):
+    now = datetime.now()
+    day_folder = now.strftime("%Y-%m-%d")
+    mission_folder = sanitize_fs_name(target_id, fallback="STANDBY")
+    stamp = now.strftime("%Y-%m-%d_%H-%M-%S")
+    prefix = "Photo" if capture_kind == "photo" else "Video"
+    extension = ".jpg" if capture_kind == "photo" else ".mp4"
+
+    base_dir = CAPTURE_ROOT / day_folder / mission_folder
+    filename = f"{prefix}_{mission_folder}_{stamp}{extension}"
+    return base_dir, base_dir / filename
+
+
+class RuntimeOrchestrator:
+    def __init__(self):
+        self.hw_calibration_requested = False
+        self.hw_calibration_requested_at = 0.0
+        self.hw_calibration_accepted = False
+        self.hw_calibrated = False
+        self.hw_calibration_retries = 0
+        self.hw_next_retry_at = 0.0
+        self.focus_calibration_started = False
+        self.focus_calibrated = False
+        self.last_handshake_code = None
+
+    def reset(self):
+        self.__init__()
+
+
+astro_runtime = None
+vision_runtime = VisionCoordinator()
+runtime_orchestrator = RuntimeOrchestrator()
+catalog_refresh_deadline = 0.0
+catalog_last_hash = ""
 
 
 class CameraManager:
     def __init__(self, mode="hardware"):
         self.mode = mode
         self.frame = None
+        self.raw_frame = None
         self.running = True
         self.camera = None
         self.video = None
         self.lock = threading.Lock()
         self.settings_lock = threading.Lock()
+        self.recording_lock = threading.Lock()
+        self.recording_thread = None
+        self.recording_active = False
+        self.last_recording_error = ""
+        self.last_recording_path = ""
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
         context = zmq.Context()
         self.zmq_socket = context.socket(zmq.PUB)
@@ -514,6 +1029,12 @@ class CameraManager:
     def get_frame(self):
         with self.lock:
             return self.frame
+
+    def get_raw_frame_copy(self):
+        with self.lock:
+            if self.raw_frame is None:
+                return None
+            return self.raw_frame.copy()
 
     def apply_camera_settings(self, settings):
         if self.camera is None or asi is None:
@@ -528,6 +1049,22 @@ class CameraManager:
                 )
         except Exception as exc:
             print(f"Camera settings update failed: {exc}")
+
+    def apply_focus_settings(self, focus):
+        if self.camera is None or asi is None:
+            return
+        focus_mode = focus.get("mode", "auto")
+        focus_value = clamp(int(focus.get("manual_value", 50)), 0, 100)
+        try:
+            with self.settings_lock:
+                if hasattr(asi, "ASI_FOCUS"):
+                    self.camera.set_control_value(
+                        asi.ASI_FOCUS,
+                        focus_value,
+                        auto=(focus_mode == "auto"),
+                    )
+        except Exception as exc:
+            print(f"Focus settings update failed: {exc}")
 
     def _init_hardware_camera(self):
         if asi is None:
@@ -581,7 +1118,6 @@ class CameraManager:
                     if ok:
                         frame = cv2.resize(raw, (VIDEO_WIDTH, VIDEO_HEIGHT))
                 if frame is None:
-                    self.zmq_socket.send(frame.tobytes())
                     frame = np.zeros((VIDEO_HEIGHT, VIDEO_WIDTH, 3), dtype=np.uint8)
                     cv2.putText(
                         frame,
@@ -608,21 +1144,119 @@ class CameraManager:
             if success:
                 with self.lock:
                     self.frame = jpeg.tobytes()
+                    self.raw_frame = frame.copy()
+
+            try:
+                h, w = frame.shape[:2]
+                payload = [
+                    b"video_feed",
+                    str(time.time()).encode("utf-8"),
+                    f"{h},{w},3".encode("utf-8"),
+                    frame.tobytes(),
+                ]
+                self.zmq_socket.send_multipart(payload, flags=zmq.NOBLOCK)
+            except Exception:
+                pass
 
             time.sleep(0.04)
+
+    def capture_photo(self, output_path):
+        frame = self.get_raw_frame_copy()
+        if frame is None:
+            return False, "No video frame available yet."
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        ok = cv2.imwrite(str(output_path), frame)
+        if not ok:
+            return False, "Failed to save photo."
+        return True, ""
+
+    def _record_video_worker(self, output_path, duration_seconds, fps):
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(
+                str(output_path),
+                fourcc,
+                float(fps),
+                (VIDEO_WIDTH, VIDEO_HEIGHT),
+            )
+            if not writer.isOpened():
+                raise RuntimeError("Video writer could not be opened.")
+
+            started = time.monotonic()
+            interval = 1.0 / max(1.0, float(fps))
+            while self.running and (time.monotonic() - started) < float(duration_seconds):
+                frame = self.get_raw_frame_copy()
+                if frame is not None:
+                    if frame.shape[1] != VIDEO_WIDTH or frame.shape[0] != VIDEO_HEIGHT:
+                        frame = cv2.resize(frame, (VIDEO_WIDTH, VIDEO_HEIGHT))
+                    writer.write(frame)
+                time.sleep(interval)
+
+            writer.release()
+            with self.recording_lock:
+                self.recording_active = False
+                self.last_recording_path = str(output_path)
+                self.last_recording_error = ""
+        except Exception as exc:
+            with self.recording_lock:
+                self.recording_active = False
+                self.last_recording_error = str(exc)
+
+    def start_video_recording(self, output_path, duration_seconds, fps=20):
+        with self.recording_lock:
+            if self.recording_active:
+                return False, "A video recording is already in progress."
+
+            self.recording_active = True
+            self.last_recording_error = ""
+            self.last_recording_path = ""
+            self.recording_thread = threading.Thread(
+                target=self._record_video_worker,
+                args=(Path(output_path), float(duration_seconds), float(fps)),
+                daemon=True,
+            )
+            self.recording_thread.start()
+            return True, ""
+
+    def recording_status(self):
+        with self.recording_lock:
+            return {
+                "active": bool(self.recording_active),
+                "last_error": self.last_recording_error,
+                "last_path": self.last_recording_path,
+            }
 
 
 cam = None
 
 
+def record_exchange(direction, payload, ws=None, delivered=True):
+    state.record_exchange(direction, payload, ws=ws, delivered=delivered)
+    if astro_runtime is not None:
+        try:
+            astro_runtime.on_ui_packet(
+                direction=direction,
+                packet=payload,
+                meta=state.client_meta(ws) if ws is not None else {},
+            )
+        except Exception:
+            pass
+
+
 async def safe_send(ws, payload):
     if ws is None or ws.closed:
+        record_exchange("tx", payload, ws=ws, delivered=False)
         return False
     try:
         await ws.send_json(payload)
+        record_exchange("tx", payload, ws=ws, delivered=True)
         return True
     except Exception as exc:
         print(f"WebSocket send failed: {exc}")
+        record_exchange("tx", payload, ws=ws, delivered=False)
         return False
 
 
@@ -632,7 +1266,7 @@ async def send_full_state(ws):
         {
             "type": "FULL_STATE",
             "data": state.data,
-            "catalog": CATALOG,
+            "catalog": state.catalog,
             "role": state.client_role(ws),
             "name": state.client_name(ws),
             "i_have_joystick": ws == state.joystick_owner,
@@ -646,6 +1280,12 @@ async def send_full_state(ws):
 async def broadcast_system_info():
     for ws in list(state.clients.keys()):
         await safe_send(ws, state.serialize_system_info(ws))
+
+
+async def broadcast_catalog():
+    payload = {"type": "CATALOG_UPDATE", "catalog": state.catalog}
+    for ws in list(state.clients.keys()):
+        await safe_send(ws, payload)
 
 
 async def broadcast_telemetry():
@@ -817,9 +1457,189 @@ async def adjust_joystick_owner_duration(ws, pkt):
         await broadcast_system_info()
 
 
+def is_command_allowed_during_init(packet_type):
+    return packet_type in {
+        "GPS_UPDATE",
+        "SYNC_CLOCK",
+        "TIMESTAMP",
+        "DATETIME",
+        "CAMERA_SETTINGS",
+        "RUNTIME_MODES",
+        "EMERGENCY_STOP",
+    }
+
+
+def refresh_system_status():
+    astro_status = (
+        astro_runtime.status()
+        if astro_runtime is not None
+        else {
+            "ready": True,
+            "time_synced": True,
+            "has_location": True,
+            "skyfield_ready": False,
+            "message": "Astronomic runtime unavailable, using static fallback.",
+        }
+    )
+    vision_status = vision_runtime.to_payload()
+    arduino_status = (
+        (astro_status.get("motor_link", {}) if isinstance(astro_status, dict) else {})
+        or {}
+    )
+
+    hardware_calibrated = bool(runtime_orchestrator.hw_calibrated)
+    focus_ready = bool(vision_status.get("ready", False))
+    astro_ready = bool(astro_status.get("ready", False))
+
+    controls_ready = bool(hardware_calibrated and focus_ready and astro_ready)
+    if controls_ready:
+        message = "All systems initialized."
+    else:
+        waiting = []
+        if not hardware_calibrated:
+            waiting.append("arduino calibration")
+        if hardware_calibrated and not vision_status["ready"]:
+            waiting.append("vision autofocus")
+        if not astro_status.get("has_location", False):
+            waiting.append("first GPS fix")
+        if not astro_status.get("time_synced", False):
+            waiting.append("time/date sync")
+        if not waiting and not astro_ready:
+            waiting.append("astronomic runtime")
+        message = f"Waiting for {' and '.join(waiting)}."
+
+    state.data["vision_status"] = vision_status
+    state.data["astronomic_status"] = astro_status
+    state.data["arduino_status"] = {
+        "available": bool(astro_runtime is not None),
+        "system_state": arduino_status.get("system_state", "UNKNOWN"),
+        "calibration_done": bool(
+            runtime_orchestrator.hw_calibrated
+            or arduino_status.get("calibration_done", False)
+        ),
+        "last_response": arduino_status.get("last_response", ""),
+        "last_debug_line": arduino_status.get("last_debug_line", ""),
+        "motor_state": arduino_status.get(
+            "motor_state", {"RA": "UNKNOWN", "DEC": "UNKNOWN", "FOC": "UNKNOWN"}
+        ),
+    }
+    state.data["system"] = {
+        "hardware_calibrated": hardware_calibrated,
+        "vision_ready": bool(vision_status["ready"]),
+        "astronomic_ready": astro_ready,
+        "controls_ready": controls_ready,
+        "catalog_ready": any(len(items) for items in state.catalog.values()),
+        "message": message,
+    }
+    return controls_ready
+
+
+def compute_catalog_hash(catalog):
+    try:
+        return json.dumps(catalog, sort_keys=True, ensure_ascii=True)
+    except Exception:
+        return str(catalog)
+
+
+async def refresh_catalog_if_due(force=False):
+    global catalog_refresh_deadline, catalog_last_hash
+    now = time.monotonic()
+    if not force and now < catalog_refresh_deadline:
+        return
+
+    if astro_runtime is None:
+        if state.catalog != CATALOG:
+            state.catalog = copy.deepcopy(CATALOG)
+            catalog_last_hash = compute_catalog_hash(state.catalog)
+            await broadcast_catalog()
+        catalog_refresh_deadline = now + 300.0
+        return
+
+    try:
+        next_catalog, delay = astro_runtime.compute_visible_catalog(
+            timestamp_ms=state.data["timestamp"]
+        )
+    except Exception as exc:
+        print(f"Catalog refresh failed: {exc}")
+        catalog_refresh_deadline = now + 30.0
+        return
+
+    state.catalog = next_catalog
+    current_target = state.data["mission"].get("target", "STANDBY")
+    if current_target and current_target != "STANDBY":
+        visible_ids = {
+            str(entry.get("id"))
+            for entries in state.catalog.values()
+            for entry in entries
+            if entry.get("id") is not None
+        }
+        if str(current_target) not in visible_ids:
+            state.data["mission"]["target"] = "STANDBY"
+            if state.data["mission"].get("action") == "GOTO":
+                state.data["mission"]["action"] = "--"
+
+    next_hash = compute_catalog_hash(next_catalog)
+    if next_hash != catalog_last_hash:
+        catalog_last_hash = next_hash
+        await broadcast_catalog()
+    catalog_refresh_deadline = now + max(5.0, float(delay or 60.0))
+
+
+async def handle_photo_capture_request(source_ws=None):
+    target_id = state.data["mission"].get("target", "STANDBY")
+    directory, output_path = build_capture_paths(target_id, "photo")
+    directory.mkdir(parents=True, exist_ok=True)
+    ok, error_msg = cam.capture_photo(output_path)
+    if not ok:
+        state.data["capture"]["last_error"] = error_msg
+        if source_ws is not None:
+            await safe_send(source_ws, {"type": "TOAST", "msg": error_msg})
+        return False
+
+    state.data["capture"]["last_photo_at"] = utc_now_iso()
+    state.data["capture"]["last_photo_path"] = str(output_path)
+    state.data["capture"]["last_error"] = ""
+    state.set_temporary_action("PHOTO", 3)
+    return True
+
+
+async def handle_video_capture_request(duration, source_ws=None):
+    target_id = state.data["mission"].get("target", "STANDBY")
+    directory, output_path = build_capture_paths(target_id, "video")
+    directory.mkdir(parents=True, exist_ok=True)
+    ok, error_msg = cam.start_video_recording(output_path, duration_seconds=duration)
+    if not ok:
+        state.data["capture"]["last_error"] = error_msg
+        if source_ws is not None:
+            await safe_send(source_ws, {"type": "TOAST", "msg": error_msg})
+        return False
+
+    state.data["capture"]["video_duration"] = duration
+    state.data["capture"]["last_video_duration"] = duration
+    state.data["capture"]["last_video_request_at"] = utc_now_iso()
+    state.data["capture"]["last_video_path"] = str(output_path)
+    state.data["capture"]["recording"] = True
+    state.data["capture"]["last_error"] = ""
+    state.set_temporary_action("VIDEO", duration)
+    return True
+
+
 async def execute_command(pkt, source_ws=None):
+    global catalog_refresh_deadline
     ptype = pkt.get("type")
     should_broadcast = False
+
+    if not is_command_allowed_during_init(ptype):
+        if not refresh_system_status():
+            if source_ws is not None:
+                await safe_send(
+                    source_ws,
+                    {
+                        "type": "TOAST",
+                        "msg": state.data["system"]["message"],
+                    },
+                )
+            return
 
     if ptype == "JOYSTICK":
         data = pkt.get("data", {})
@@ -836,7 +1656,26 @@ async def execute_command(pkt, source_ws=None):
         return
 
     elif ptype == "MISSION":
-        state.data["mission"]["target"] = pkt.get("target", "STANDBY")
+        requested_target = pkt.get("target", "STANDBY")
+        if requested_target != "STANDBY":
+            visible_ids = {
+                str(entry.get("id"))
+                for entries in state.catalog.values()
+                for entry in entries
+                if entry.get("id") is not None
+            }
+            if str(requested_target) not in visible_ids:
+                if source_ws is not None:
+                    await safe_send(
+                        source_ws,
+                        {
+                            "type": "TOAST",
+                            "msg": "Selected mission is not currently visible.",
+                        },
+                    )
+                return
+
+        state.data["mission"]["target"] = requested_target
         state.data["mission"]["action"] = pkt.get("action", "GOTO")
         state.action_expires_at = None
         if state.data["mission"]["action"] not in {"PHOTO", "VIDEO"}:
@@ -846,19 +1685,17 @@ async def execute_command(pkt, source_ws=None):
     elif ptype == "COMMAND":
         action = pkt.get("action", "--")
         if action == "PHOTO":
-            state.data["capture"]["last_photo_at"] = utc_now_iso()
-            state.set_temporary_action("PHOTO", 3)
+            should_broadcast = await handle_photo_capture_request(source_ws=source_ws)
         elif action == "VIDEO":
             duration = clamp(int(pkt.get("duration", 10)), 1, 3600)
-            state.data["capture"]["video_duration"] = duration
-            state.data["capture"]["last_video_duration"] = duration
-            state.data["capture"]["last_video_request_at"] = utc_now_iso()
-            state.set_temporary_action("VIDEO", duration)
+            should_broadcast = await handle_video_capture_request(
+                duration=duration, source_ws=source_ws
+            )
         else:
             state.data["mission"]["action"] = action
             state.action_expires_at = None
             state.last_action_before_temp = action
-        should_broadcast = True
+            should_broadcast = True
 
     elif ptype == "GPS_UPDATE":
         data = pkt.get("data", pkt)
@@ -867,6 +1704,13 @@ async def execute_command(pkt, source_ws=None):
             "lon": float(data.get("lon", 0.0) or 0.0),
             "alt": float(data.get("alt", 0.0) or 0.0),
         }
+        if astro_runtime is not None:
+            astro_runtime.set_location(
+                state.data["gps"]["lat"],
+                state.data["gps"]["lon"],
+                state.data["gps"]["alt"],
+            )
+        catalog_refresh_deadline = 0.0
         should_broadcast = True
 
     elif ptype in {"SYNC_CLOCK", "TIMESTAMP", "DATETIME"}:
@@ -881,7 +1725,14 @@ async def execute_command(pkt, source_ws=None):
                 timestamp_ms = int(float(timestamp_ms))
             except (TypeError, ValueError):
                 timestamp_ms = None
-        state.sync_clock(timestamp_ms=timestamp_ms, datetime_value=datetime_value)
+        state.sync_clock(
+            timestamp_ms=timestamp_ms,
+            datetime_value=datetime_value,
+            explicit=True,
+        )
+        if astro_runtime is not None:
+            astro_runtime.set_time(timestamp_ms=timestamp_ms, datetime_value=datetime_value)
+        catalog_refresh_deadline = 0.0
         should_broadcast = True
 
     elif ptype == "CAMERA_SETTINGS":
@@ -912,21 +1763,75 @@ async def execute_command(pkt, source_ws=None):
         payload = pkt.get("data", {})
         if payload.get("mode") in {"auto", "manual"}:
             focus["mode"] = payload["mode"]
+        # Tick-domain value has priority when provided.
+        max_ticks = vision_runtime.TOTAL_FOCUS_STEPS
+        if "manual_ticks" in payload:
+            try:
+                manual_ticks = _clamp_float(payload["manual_ticks"], 0.0, max_ticks)
+            except Exception:
+                manual_ticks = float(focus.get("manual_ticks", 0.0))
+            focus["manual_ticks"] = int(round(manual_ticks))
+            focus["manual_value"] = clamp(int(round((manual_ticks / max_ticks) * 100.0)), 0, 100)
         if "manual_value" in payload:
             focus["manual_value"] = clamp(int(payload["manual_value"]), 0, 100)
+            focus["manual_ticks"] = int(round((float(focus["manual_value"]) / 100.0) * max_ticks))
+        cam.apply_focus_settings(focus)
+        vision_runtime.update_focus_settings(focus["mode"], focus["manual_value"])
+        if astro_runtime is not None:
+            astro_runtime.set_focus_info(
+                mode=focus["mode"],
+                manual_value=focus["manual_value"],
+                best_step=vision_runtime.best_focus_step,
+                current_step=vision_runtime.current_focus_step,
+                manual_ticks=focus.get("manual_ticks"),
+            )
+        should_broadcast = True
+
+    elif ptype == "AUTOFOCUS_RECALIBRATE":
+        if not runtime_orchestrator.hw_calibrated:
+            if source_ws is not None:
+                await safe_send(
+                    source_ws,
+                    {"type": "TOAST", "msg": "Hardware calibration is not complete yet."},
+                )
+            return
+        vision_runtime.start_focus_calibration()
+        runtime_orchestrator.focus_calibration_started = True
+        runtime_orchestrator.focus_calibrated = False
         should_broadcast = True
 
     elif ptype == "VIDEO_REQUEST":
         duration = clamp(int(pkt.get("duration", 10)), 1, 3600)
-        state.data["capture"]["video_duration"] = duration
-        state.data["capture"]["last_video_duration"] = duration
-        state.data["capture"]["last_video_request_at"] = utc_now_iso()
-        state.set_temporary_action("VIDEO", duration)
-        should_broadcast = True
+        should_broadcast = await handle_video_capture_request(
+            duration=duration, source_ws=source_ws
+        )
 
     elif ptype == "PHOTO_REQUEST":
-        state.data["capture"]["last_photo_at"] = utc_now_iso()
-        state.set_temporary_action("PHOTO", 3)
+        should_broadcast = await handle_photo_capture_request(source_ws=source_ws)
+
+    elif ptype == "RUNTIME_MODES":
+        payload = pkt.get("data", {})
+        modes = state.data.get("runtime_modes", {})
+        if "simulate_arduino" in payload:
+            modes["simulate_arduino"] = bool(payload["simulate_arduino"])
+            if astro_runtime is not None:
+                try:
+                    astro_runtime.motor_link.simulate = bool(payload["simulate_arduino"])
+                except Exception:
+                    pass
+        if "camera_mode" in payload:
+            requested = str(payload["camera_mode"]).lower()
+            if requested in {"hardware", "sim"}:
+                modes["camera_mode"] = cam.mode
+                if source_ws is not None:
+                    await safe_send(
+                        source_ws,
+                        {
+                            "type": "TOAST",
+                            "msg": "Camera mode changes require a service restart.",
+                        },
+                    )
+        state.data["runtime_modes"] = modes
         should_broadcast = True
 
     if should_broadcast:
@@ -1029,6 +1934,7 @@ async def handle_websocket(request):
             except json.JSONDecodeError:
                 continue
 
+            record_exchange("rx", pkt, ws=ws, delivered=True)
             ptype = pkt.get("type")
 
             if ptype == "LOGIN_BRIDGE":
@@ -1277,22 +2183,267 @@ async def page_bridge(request):
     return web.FileResponse("./public/bridge.html")
 
 
+async def debug_state(request):
+    snapshot = {
+        "ts": utc_now_iso(),
+        "data": state.data,
+        "catalog": state.catalog,
+        "clients": [state.client_meta(ws) for ws in state.clients.keys()],
+        "system": state.serialize_system_info(state.commander_ws)
+        if state.commander_ws in state.clients
+        else {"type": "SYS_INFO", "users": []},
+    }
+    return web.json_response(snapshot)
+
+
+async def debug_exchanges(request):
+    try:
+        limit = int(request.query.get("limit", "200"))
+    except ValueError:
+        limit = 200
+    return web.json_response({"events": state.exchange_snapshot(limit=limit)})
+
+
+async def handle_runtime_orchestration(vision_payload):
+    if astro_runtime is None:
+        return
+
+    link = astro_runtime.motor_link
+    events = link.drain_events(limit=200)
+
+    for event in events:
+        if event.get("kind") != "ack":
+            continue
+        code = event.get("code")
+        action = event.get("action")
+        runtime_orchestrator.last_handshake_code = code
+
+        if action == 3:
+            if code == 1:
+                runtime_orchestrator.hw_calibration_accepted = True
+            elif code == 2:
+                runtime_orchestrator.hw_calibrated = True
+            elif code == 0:
+                runtime_orchestrator.hw_calibration_accepted = False
+                runtime_orchestrator.hw_next_retry_at = time.monotonic() + 1.0
+
+    # Hardware calibration handshake with graceful retry.
+    now = time.monotonic()
+    should_send_calib = False
+    if not runtime_orchestrator.hw_calibration_requested:
+        should_send_calib = True
+    elif (
+        runtime_orchestrator.hw_calibration_requested
+        and not runtime_orchestrator.hw_calibrated
+        and now >= runtime_orchestrator.hw_next_retry_at
+        and runtime_orchestrator.hw_calibration_retries > 0
+    ):
+        should_send_calib = True
+
+    if should_send_calib and not runtime_orchestrator.hw_calibrated:
+        sent = link.send_command(3)
+        runtime_orchestrator.hw_calibration_requested = bool(sent)
+        runtime_orchestrator.hw_calibration_requested_at = now
+        if sent:
+            runtime_orchestrator.hw_calibration_retries += 1
+            runtime_orchestrator.hw_next_retry_at = now + CALIBRATION_COMMAND_TIMEOUT_S
+            print(
+                f"Startup calibration request sent (3), try #{runtime_orchestrator.hw_calibration_retries}."
+            )
+        else:
+            runtime_orchestrator.hw_next_retry_at = now + 1.0
+            print("Failed to send startup calibration command (3) to Arduino.")
+
+    if (
+        runtime_orchestrator.hw_calibration_requested
+        and not runtime_orchestrator.hw_calibrated
+        and runtime_orchestrator.hw_calibration_accepted
+    ):
+        elapsed = time.monotonic() - runtime_orchestrator.hw_calibration_requested_at
+        if elapsed > CALIBRATION_COMMAND_TIMEOUT_S:
+            # Do not force ERROR here; keep system alive and let UI remain accessible.
+            print("Warning: hardware calibration timeout waiting for done code 2.")
+            runtime_orchestrator.hw_calibration_accepted = False
+            runtime_orchestrator.hw_next_retry_at = time.monotonic() + 1.0
+
+    # Backward-compatible fallback when firmware prints state but does not emit "2".
+    last_dbg = link.status().get("last_debug_line", "")
+    if (
+        runtime_orchestrator.hw_calibration_accepted
+        and not runtime_orchestrator.hw_calibrated
+        and "mount=READY" in str(last_dbg)
+    ):
+        runtime_orchestrator.hw_calibrated = True
+
+    if runtime_orchestrator.hw_calibrated and not runtime_orchestrator.focus_calibration_started:
+        vision_runtime.start_focus_calibration()
+        runtime_orchestrator.focus_calibration_started = True
+
+    # Run autofocus handshake against Arduino command acks.
+    if runtime_orchestrator.focus_calibration_started:
+        vision_runtime.handle_arduino_events(events, link)
+        vision_runtime.tick_autofocus(link)
+
+    if runtime_orchestrator.focus_calibration_started and vision_runtime.to_payload().get("ready", False):
+        runtime_orchestrator.focus_calibrated = True
+
+    tracking_enabled = bool(
+        runtime_orchestrator.hw_calibrated
+        and runtime_orchestrator.focus_calibrated
+        and astro_runtime.ready
+    )
+    astro_runtime.set_command_gates(
+        hardware_ready=runtime_orchestrator.hw_calibrated,
+        focus_ready=runtime_orchestrator.focus_calibrated,
+        tracking_enabled=tracking_enabled,
+    )
+
+
 async def background_state_loop(app):
+    last_telemetry_push = 0.0
+    last_system_info_push = 0.0
     while True:
         state.update_clock()
         state.clear_temporary_action_if_needed()
+
+        frame = cam.get_raw_frame_copy()
+        vision_runtime.update_from_frame(frame)
+        # Orchestration can change autofocus state (commands/acks), so we refresh
+        # payload after running it.
+        await handle_runtime_orchestration(vision_runtime.to_payload())
+        vision_payload = vision_runtime.to_payload()
+        state.data["vision_status"] = vision_payload
+
+        if astro_runtime is not None:
+            try:
+                astro_runtime.set_tracking_error(
+                    dx=vision_payload.get("dx", 0.0),
+                    dy=vision_payload.get("dy", 0.0),
+                    frame_width=vision_payload.get("frame_width", VIDEO_WIDTH),
+                    frame_height=vision_payload.get("frame_height", VIDEO_HEIGHT),
+                )
+                astro_runtime.set_focus_info(
+                    mode=vision_payload.get("mode", "auto"),
+                    manual_value=vision_payload.get("manual_value", 50),
+                    best_step=vision_payload.get("best_step", 0.0),
+                    current_step=vision_payload.get("current_step", 0.0),
+                    manual_ticks=state.data.get("focus", {}).get("manual_ticks"),
+                )
+                astro_runtime.tick(state.data)
+            except Exception as exc:
+                print(f"Astronomic tick failed: {exc}")
+
+        recording_status = cam.recording_status()
+        state.data["capture"]["recording"] = bool(recording_status["active"])
+        if recording_status["last_error"]:
+            state.data["capture"]["last_error"] = recording_status["last_error"]
+        if recording_status["last_path"]:
+            state.data["capture"]["last_video_path"] = recording_status["last_path"]
+
+        refresh_system_status()
+
         if (
             state.joystick_owner is not None
             and state.joystick_expires_at is not None
             and time.time() >= state.joystick_expires_at
         ):
             await revoke_joystick(reason="expired", advance_queue=True)
-        await broadcast_telemetry()
-        await broadcast_system_info()
-        await asyncio.sleep(1)
+        await refresh_catalog_if_due(force=False)
+
+        now = time.monotonic()
+        if (now - last_telemetry_push) >= 0.1:
+            await broadcast_telemetry()
+            last_telemetry_push = now
+        if (now - last_system_info_push) >= 0.5:
+            await broadcast_system_info()
+            last_system_info_push = now
+
+        await asyncio.sleep(BACKGROUND_LOOP_INTERVAL_S)
 
 
 async def start_background_tasks(app):
+    global astro_runtime, catalog_refresh_deadline, catalog_last_hash
+    runtime_orchestrator.reset()
+    CAPTURE_ROOT.mkdir(parents=True, exist_ok=True)
+    EXCHANGE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    EXCHANGE_LOG_FILE.touch(exist_ok=True)
+
+    env_sim_arduino = os.environ.get("STARTRACK_SIM_ARDUINO", "").strip().lower()
+    if env_sim_arduino in {"1", "true", "yes", "on"}:
+        simulate_arduino = True
+    elif env_sim_arduino in {"0", "false", "no", "off"}:
+        simulate_arduino = False
+    else:
+        simulate_arduino = cam.mode == "sim"
+
+    state.data["runtime_modes"] = {
+        "camera_mode": cam.mode,
+        "simulate_arduino": simulate_arduino,
+    }
+
+    requested_port = os.environ.get("STARTRACK_ARDUINO_PORT", "auto").strip()
+    if requested_port.lower() == "auto":
+        arduino_port = detect_arduino_port("COM6" if os.name == "nt" else "/dev/ttyUSB0")
+    else:
+        arduino_port = requested_port
+    arduino_baud = int(os.environ.get("STARTRACK_ARDUINO_BAUD", "115200"))
+    state.data["runtime_modes"]["arduino_port"] = arduino_port
+
+    if AstronomicOperator is not None:
+        try:
+            astro_runtime = AstronomicOperator(
+                base_catalog=CATALOG,
+                latitude=state.data["gps"]["lat"],
+                longitude=state.data["gps"]["lon"],
+                altitude_m=state.data["gps"]["alt"],
+                data_root=str(PROJECT_ROOT),
+                simulate_arduino=simulate_arduino,
+                arduino_port=arduino_port,
+                arduino_baudrate=arduino_baud,
+            )
+        except Exception as exc:
+            print(f"Astronomic runtime startup failed: {exc}")
+            astro_runtime = None
+    else:
+        astro_runtime = None
+
+    focus_cfg = state.data.get("focus", {})
+    if "manual_ticks" not in focus_cfg:
+        focus_cfg["manual_ticks"] = int(
+            round((float(focus_cfg.get("manual_value", 50)) / 100.0) * vision_runtime.TOTAL_FOCUS_STEPS)
+        )
+    focus_cfg["manual_ticks"] = int(
+        round(_clamp_float(focus_cfg.get("manual_ticks", 0), 0.0, vision_runtime.TOTAL_FOCUS_STEPS))
+    )
+    focus_cfg["manual_value"] = clamp(
+        int(round((float(focus_cfg["manual_ticks"]) / vision_runtime.TOTAL_FOCUS_STEPS) * 100.0)),
+        0,
+        100,
+    )
+    state.data["focus"] = focus_cfg
+
+    vision_runtime.update_focus_settings(
+        state.data["focus"]["mode"], state.data["focus"]["manual_value"]
+    )
+    if astro_runtime is not None:
+        astro_runtime.set_command_gates(
+            hardware_ready=False,
+            focus_ready=False,
+            tracking_enabled=False,
+        )
+        astro_runtime.set_focus_info(
+            mode=state.data["focus"]["mode"],
+            manual_value=state.data["focus"]["manual_value"],
+            best_step=vision_runtime.best_focus_step,
+            current_step=vision_runtime.current_focus_step,
+            manual_ticks=state.data["focus"].get("manual_ticks"),
+        )
+    if astro_runtime is not None and not astro_runtime.ready:
+        state.catalog = {tab: [] for tab in CATALOG}
+    refresh_system_status()
+    catalog_last_hash = compute_catalog_hash(state.catalog)
+    catalog_refresh_deadline = 0.0
+    await refresh_catalog_if_due(force=True)
     app["state_loop"] = asyncio.create_task(background_state_loop(app))
 
 
@@ -1302,11 +2453,21 @@ async def cleanup_background_tasks(app):
         await app["state_loop"]
     except asyncio.CancelledError:
         pass
+    if astro_runtime is not None:
+        try:
+            astro_runtime.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", default="hardware")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("STARTRACK_PORT", "8443")),
+    )
     args = parser.parse_args()
 
     cam = CameraManager(args.mode)
@@ -1317,13 +2478,18 @@ if __name__ == "__main__":
     app.router.add_get("/remote", page_remote)
     app.router.add_get("/bridge", page_bridge)
     app.router.add_get("/stream", video_feed)
+    app.router.add_get("/debug/state", debug_state)
+    app.router.add_get("/debug/exchanges", debug_exchanges)
     app.router.add_get("/ws", handle_websocket)
     app.router.add_static("/static", "./public/static")
     app.on_startup.append(start_background_tasks)
     app.on_cleanup.append(cleanup_background_tasks)
 
-    ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    ssl_ctx.load_cert_chain(SSL_CERT, SSL_KEY)
-
-    print("--- STARTRACK READY ---")
-    web.run_app(app, port=443, ssl_context=ssl_ctx)
+    ssl_ctx = None
+    if os.path.exists(SSL_CERT) and os.path.exists(SSL_KEY):
+        ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_ctx.load_cert_chain(SSL_CERT, SSL_KEY)
+        print("--- STARTRACK READY (HTTPS) ---")
+    else:
+        print("--- STARTRACK READY (HTTP fallback: cert.pem/key.pem missing) ---")
+    web.run_app(app, port=args.port, ssl_context=ssl_ctx)

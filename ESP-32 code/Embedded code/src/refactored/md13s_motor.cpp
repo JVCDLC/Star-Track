@@ -44,8 +44,14 @@ MD13SMotor::MD13SMotor(const char* name,
       m_requestedSpeedTicksPerSec(0.0f),  // No speed requested initially
       m_speedIntegral(0.0f),               // Speed PID integral accumulator
       m_prevSpeedError(0.0f),              // Previous speed error for derivative
+      m_filteredActualSpeed(0.0f),         // Filtered speed estimate
       m_profileTick(0.0f),                 // Virtual position tracking
-      m_prevSpeedTick(0) {}                // Base position for velocity calc
+      m_prevSpeedTick(0),                  // Base position for velocity calc
+      m_speedLog(),
+      m_speedLogCount(0),
+      m_speedLogActive(false),
+      m_speedLogStartMs(0),
+      m_speedLogLastSampleMs(0) {}
 
 /**
  * @brief Command motor to move at constant speed to a target position.
@@ -84,15 +90,90 @@ bool MD13SMotor::commandSpeedTicksPerSecond(long targetTicks, float ticksPerSeco
   // Reset speed PID state for clean start without accumulated integral windup
   m_speedIntegral = 0.0f;
   m_prevSpeedError = 0.0f;
+  m_filteredActualSpeed = 0.0f;
   
   // Initialize velocity profile: starts at current position and moves at constant speed
   m_profileTick = static_cast<float>(readTicks());  // Virtual position = actual position
   m_prevSpeedTick = readTicks();                    // Base for velocity delta calculation
+  resetSpeedLog(millis());                          // Start trace capture for this speed move
   
   // Reset position PID controller (used for position assist component)
   resetController();
   
   return true;
+}
+
+/**
+ * @brief Update speed-loop PID gains at runtime.
+ * @param kp New proportional gain
+ * @param ki New integral gain
+ * @param kd New derivative gain
+ * @return true if gains are valid and applied
+ */
+bool MD13SMotor::setSpeedPidGains(float kp, float ki, float kd) {
+  if (!isfinite(kp) || !isfinite(ki) || !isfinite(kd)) {
+    return false;
+  }
+  if (kp < 0.0f || ki < 0.0f || kd < 0.0f) {
+    return false;
+  }
+  m_speedPid.kp = kp;
+  m_speedPid.ki = ki;
+  m_speedPid.kd = kd;
+  m_speedIntegral = 0.0f;
+  m_prevSpeedError = 0.0f;
+  resetController();
+  return true;
+}
+
+void MD13SMotor::onTargetReached(unsigned long nowMs, long currentTicks) {
+  if (readMotionMode() == MotionMode::SPEED) {
+    dumpSpeedLog(nowMs, currentTicks);
+  }
+}
+
+void MD13SMotor::resetSpeedLog(unsigned long nowMs) {
+  m_speedLogCount = 0;
+  m_speedLogActive = true;
+  m_speedLogStartMs = nowMs;
+  m_speedLogLastSampleMs = nowMs;
+}
+
+void MD13SMotor::maybeAppendSpeedLog(unsigned long nowMs,
+                                     float desiredTicksPerSec,
+                                     float actualTicksPerSec) {
+  if (!m_speedLogActive) return;
+  if ((nowMs - m_speedLogLastSampleMs) < m_speedPid.speedLogSamplePeriodMs) return;
+  m_speedLogLastSampleMs = nowMs;
+  if (m_speedLogCount >= kSpeedLogCapacity) return;
+
+  const unsigned long elapsedMs = nowMs - m_speedLogStartMs;
+  m_speedLog[m_speedLogCount].tMs = static_cast<uint16_t>((elapsedMs > 65535UL) ? 65535UL : elapsedMs);
+  m_speedLog[m_speedLogCount].desiredTicksPerSec = static_cast<int16_t>(lroundf(desiredTicksPerSec));
+  m_speedLog[m_speedLogCount].actualTicksPerSec = static_cast<int16_t>(lroundf(actualTicksPerSec));
+  ++m_speedLogCount;
+}
+
+void MD13SMotor::dumpSpeedLog(unsigned long nowMs, long finalTicks) {
+  if (!m_speedLogActive) return;
+  m_speedLogActive = false;
+
+  Serial.print(F("DBG,FOC,SPEED_TRACE_BEGIN,count="));
+  Serial.print(m_speedLogCount);
+  Serial.print(F(",durationMs="));
+  Serial.print(nowMs - m_speedLogStartMs);
+  Serial.print(F(",finalTick="));
+  Serial.println(finalTicks);
+
+  for (uint16_t i = 0; i < m_speedLogCount; ++i) {
+    Serial.print(F("DBG,FOC,SPEED_TRACE,t="));
+    Serial.print(m_speedLog[i].tMs);
+    Serial.print(F(",des="));
+    Serial.print(m_speedLog[i].desiredTicksPerSec);
+    Serial.print(F(",act="));
+    Serial.println(m_speedLog[i].actualTicksPerSec);
+  }
+  Serial.println(F("DBG,FOC,SPEED_TRACE_END"));
 }
 
 /**
@@ -185,8 +266,6 @@ int16_t MD13SMotor::computeControlPwm(long errorTicks,
                                       float dtSeconds,
                                       long currentTicks,
                                       unsigned long nowMs) {
-  (void)nowMs;  // Unused: not needed for this algorithm
-
   ////////////////////////////////////////////////////////////////////////////
   // STEP 1: Check mode - if in POSITION mode, use base class PID instead
   ////////////////////////////////////////////////////////////////////////////
@@ -205,7 +284,20 @@ int16_t MD13SMotor::computeControlPwm(long errorTicks,
   if (errorTicks == 0) {
     m_speedIntegral = 0.0f;  // Reset PID state
     m_prevSpeedError = 0.0f;
+    dumpSpeedLog(nowMs, currentTicks);
     return 0;  // Stop motor
+  }
+
+  // Very close to target: hand over to position PID to "snap" precisely
+  // without oscillating in speed mode.
+  if (absLong(errorTicks) <= static_cast<long>(m_speedPid.snapWindowTicks)) {
+    m_speedIntegral = 0.0f;
+    m_prevSpeedError = 0.0f;
+    const int16_t snapPwm = MotorBase::computeControlPwm(errorTicks, dtSeconds, currentTicks, nowMs);
+    if (absLong(errorTicks) <= 1) {
+      dumpSpeedLog(nowMs, currentTicks);
+    }
+    return snapPwm;
   }
 
   ////////////////////////////////////////////////////////////////////////////
@@ -260,7 +352,10 @@ int16_t MD13SMotor::computeControlPwm(long errorTicks,
   // Example: currentTicks=1000, m_prevSpeedTick=995, dt=0.005
   //   - delta = 1000 - 995 = 5 ticks
   //   - actualSpeed = 5 / 0.005 = 1000 ticks/sec
-  const float actualSpeed = static_cast<float>(currentTicks - m_prevSpeedTick) / dtSeconds;
+  const float actualSpeedRaw = static_cast<float>(currentTicks - m_prevSpeedTick) / dtSeconds;
+  // Low-pass speed estimate to avoid control jitter from encoder quantization.
+  m_filteredActualSpeed = (0.75f * m_filteredActualSpeed) + (0.25f * actualSpeedRaw);
+  const float actualSpeed = m_filteredActualSpeed;
   // How far off speed are we from target?
   const float speedError = desiredSpeed - actualSpeed;  // Positive = too slow, Negative = too fast
   // Store current position for next cycle's delta calculation
@@ -290,9 +385,12 @@ int16_t MD13SMotor::computeControlPwm(long errorTicks,
   // speedOut += Kd * speedDerivative;
   
   // Combine all PID terms
+  float derivativeTerm = m_speedPid.kd * speedDerivative;
+  if (derivativeTerm > 20.0f) derivativeTerm = 20.0f;
+  if (derivativeTerm < -20.0f) derivativeTerm = -20.0f;
   const float speedOut = (m_speedPid.kp * speedError) +
                          (m_speedPid.ki * m_speedIntegral) +
-                         (m_speedPid.kd * speedDerivative);
+                         derivativeTerm;
 
   ////////////////////////////////////////////////////////////////////////////
   // STEP 8: Position assist - keep motor on the velocity profile
@@ -303,7 +401,11 @@ int16_t MD13SMotor::computeControlPwm(long errorTicks,
   // Example: speedOut=100, profileError=10 ticks, positionAssistKp=0.5
   //   - positionAssist = 0.5 * 10 = 5
   //   - combined = 100 + 5 = 105 (extra PWM to catch up to profile)
-  const float positionAssist = m_speedPid.positionAssistKp * static_cast<float>(profileErrorTicks);
+  float positionAssist = m_speedPid.positionAssistKp * static_cast<float>(profileErrorTicks);
+  // Keep assist bounded so it does not dominate and distort requested speed.
+  const float assistLimit = (fabsf(m_requestedSpeedTicksPerSec) * 0.02f) + 8.0f;
+  if (positionAssist > assistLimit) positionAssist = assistLimit;
+  if (positionAssist < -assistLimit) positionAssist = -assistLimit;
   float combined = speedOut + positionAssist;
 
   ////////////////////////////////////////////////////////////////////////////
@@ -312,14 +414,31 @@ int16_t MD13SMotor::computeControlPwm(long errorTicks,
   // Stiction floor: minimum PWM needed to overcome motor friction
   // Without this, motor won't move when speedOut is below stiction threshold
   const int16_t stiction = static_cast<int16_t>(readAdaptiveMinPwmForDir(direction));
-  // Combine with stiction floor (applied in direction of motion)
-  int32_t pwm = static_cast<int32_t>(lroundf(combined)) + (direction * stiction);
-  
-  // Ensure we meet or exceed stiction floor (can't go slower than needed to move)
-  if (direction > 0 && pwm < stiction) pwm = stiction;      // Forward motion
-  if (direction < 0 && pwm > -stiction) pwm = -stiction;    // Reverse motion
+  int32_t pwm = static_cast<int32_t>(lroundf(combined));
 
-  // Clamp to valid PWM output range and return
+  // Do not let the speed loop command reverse while we are still far from target.
+  // Reverse is handled by position PID inside the final snap window.
+  if ((pwm * direction) < 0 && absLong(errorTicks) > static_cast<long>(m_speedPid.snapWindowTicks)) {
+    pwm = static_cast<int32_t>(direction * stiction);
+  }
+
+  // Apply stiction only as a breakaway helper when speed is near zero,
+  // not as a permanent bias. This keeps long sweeps much closer to constant speed.
+  if (fabsf(actualSpeed) < m_speedPid.minSpeedTicksPerSec && absLong(errorTicks) > 1) {
+    if (direction > 0 && pwm < stiction) pwm = stiction;
+    if (direction < 0 && pwm > -stiction) pwm = -stiction;
+  }
+
+  maybeAppendSpeedLog(nowMs, desiredSpeed, actualSpeed);
+
+  // Clamp before int16 cast. Without this saturation, large transient values
+  // can overflow int16 and flip sign, which can falsely trigger limit-stop
+  // protection and terminate speed moves immediately.
+  const int32_t pwmMax = static_cast<int32_t>(m_runtime.pwmMax);
+  if (pwm > pwmMax) pwm = pwmMax;
+  if (pwm < -pwmMax) pwm = -pwmMax;
+
+  // Return final bounded command.
   return static_cast<int16_t>(pwm);
 }
 
