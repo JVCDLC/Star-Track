@@ -127,7 +127,7 @@ def updateCurrentTime(importedTime = None):
     """
         set the current time 
         input: tt : list of [year, month, day, hour, min, sec, mico-sec (6 digits)]
-        output: None
+        output: currentTime : time object from skyfield
     """
     global currentTime, timeZone
    
@@ -136,21 +136,15 @@ def updateCurrentTime(importedTime = None):
     
     else:
         timeZoneInfo = ZoneInfo(str(timeZone))
-        print('tz info', timeZoneInfo)
         dateTime = datetime(importedTime[0],importedTime[1],importedTime[2], #year, month, day
                             importedTime[3],importedTime[4],importedTime[5], #hour, min, sec
                             importedTime[6], tzinfo = timeZoneInfo )                                # micro sec (1/1 000 000) of second
-        print(dateTime)
-       
-       
+      
         currentTime = timeScale.from_datetime(dateTime.replace(fold=1))
-        print('fold test')
-        print(str(timeScale.from_datetime(dateTime.replace(fold=0))))
-        print(str(timeScale.from_datetime(dateTime.replace(fold=1))))
     
-    print("temps :" +str(currentTime.astimezone(timeZone)))
+    return currentTime
 
-def updateLocation(lat,lon):
+def updateLocation(lat: float, lon: float):
     """
         Update the observer location
         Inputs: lat : Latitude in decimal degrees
@@ -163,7 +157,7 @@ def updateLocation(lat,lon):
     timeZone = timezone_from_position(lat,lon)
     return
 
-def timezone_from_position(lat, lon):
+def timezone_from_position(lat: float, lon: float): 
     """
         used in updateLocation
         Inputs: lat : Latitude in decimal degrees
@@ -184,7 +178,7 @@ def timezone_from_position(lat, lon):
 #         Outputs: True if the celestial body is above the horizon, False otherwise
 #     """
 #     global currentTime
-#     currentTime = timeScale.now()
+#     updateCurrentTime() #add francis time update here
 #     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz()
 #     altitude = observerInfo[0].degrees
 #     if altitude > 0: # we consider the object visible if its altitude is greater than 0 degrees to avoid tracking objects too close to the horizon
@@ -238,7 +232,7 @@ def print_HaDec(CB,name=''):
         Outputs: None
     """
     global currentTime
-    currentTime = timeScale.now()
+    updateCurrentTime()#add francis time update here
     observerInfo = observer.at(currentTime).observe(CB).apparent().hadec() 
     ha = observerInfo[0].degrees
     dec = observerInfo[1].degrees
@@ -266,7 +260,7 @@ def print_HaDec(CB,name=''):
 #         Outputs: None
 #     """
 #     global currentTime
-#     currentTime = timeScale.now()
+#     updateCurrentTime()#add francis time update here
 #     observerInfo = observer.at(currentTime).observe(CB).apparent().altaz() 
 #     print('\nCurrent position of', name)
 #     print('  Altitude :', observerInfo[0])
@@ -330,7 +324,7 @@ def above_altitude_predicate( CB, altitude_deg):
 
 
 def rising_setting_above_alt( CB, altitude_deg ):
-    t0 = timeScale.now()
+    t0 = updateCurrentTime() #add francis time pudate here
     t1 = timeScale.utc(t0.utc_datetime() + timedelta(days=3))
 
     predicate = above_altitude_predicate(CB, altitude_deg)
@@ -358,7 +352,7 @@ def rising_setting_above_alt( CB, altitude_deg ):
     return risingAboveAlt, settingAboveAlt
 
 def print_visible_catalog():
-  
+    updateCurrentTime() # add francis time here
     update_visible_catalog()
     print("\nVisible catalog :")
     for key in visibleCatalog.keys():
@@ -677,6 +671,7 @@ if __name__ == "__main__":
     # print(sett)
     # rising_setting_time(celestialBody['JUPITER'])
     # print_visible_catalog()
+    print( INTERVALS['earth_rotation'])
     
     pass
 
