@@ -12,8 +12,8 @@ static const bool kDebugLogsEnabled = true;
 static const unsigned long kDebugPeriodMs = 6000;
 // Staged launch delays for command "3" (CALIBRATE_ALL).
 // Adjust these values to tune the gap between motor calibration starts.
-static const unsigned long kCalibLaunchDelayRaToDecMs = 10;
-static const unsigned long kCalibLaunchDelayDecToFocMs = 10;
+static const unsigned long kCalibLaunchDelayRaToDecMs = 100;
+static const unsigned long kCalibLaunchDelayDecToFocMs = 100;
 
 PidConfig buildDecPid() { // PID config tuned for DEC axis
   PidConfig cfg;
@@ -37,10 +37,10 @@ PidConfig buildRaPid() { // PID configu tuned for RA axis
 
 PidConfig buildFocusPositionPid() { // PID config tuned for focus position control (used in both position and speed modes)
   PidConfig cfg;
-  // Focus needs smoother final convergence to avoid visible oscillation.
-  cfg.kp = 0.08f;
-  cfg.ki = 0.008f;
-  cfg.kd = 0.002f;
+  // Focus should prioritize quick settle near target over micro-correction.
+  cfg.kp = 0.06f;
+  cfg.ki = 0.002f;
+  cfg.kd = 0.001f;
   cfg.integralMin = -220.0f;
   cfg.integralMax = 220.0f;
   return cfg;
@@ -48,15 +48,15 @@ PidConfig buildFocusPositionPid() { // PID config tuned for focus position contr
 
 SpeedPidConfig buildFocusSpeedPid() { // PID config tuned for focus speed control
   SpeedPidConfig cfg;
-  cfg.kp = 0.3f;
-  cfg.ki = 0.05f;
+  cfg.kp = 0.5f;
+  cfg.ki = 0.08f;
   cfg.kd = 0.00f;
   cfg.integralMin = -400.0f;
   cfg.integralMax = 400.0f;
   cfg.positionAssistKp = 0.0f;   // Lower assist to avoid speed overshoot on short sweeps
-  cfg.slowdownWindowTicks = 150;   // Keep full speed for most of the path, then decelerate near target
+  cfg.slowdownWindowTicks = 110;   // Keep full speed for most of the path, then decelerate near target
   cfg.minSpeedTicksPerSec = 0.8f; // Minimum speed to maintain when close to target (helps overcome stiction)
-  cfg.snapWindowTicks = 60;       // Hand over to position PID in final ticks for precise lock
+  cfg.snapWindowTicks = 40;       // Hand over to position PID only very near target
   cfg.speedLogSamplePeriodMs = 150; // Speed trace sample period for debug output
   return cfg;
 }
@@ -75,7 +75,8 @@ MotorRuntimeConfig buildRuntimeFocus() { // Focus runtime with extra settle tole
   // Hard safety cap for focus mechanics: never command above 100 PWM.
   cfg.pwmMax = 100;
   cfg.noMotionTimeoutMs = 3000;
-  cfg.atTargetToleranceTicks = 2;
+  // Allow +/-10 ticks deadband to avoid end-of-move hunting.
+  cfg.atTargetToleranceTicks = 10;
   return cfg;
 }
 
@@ -210,8 +211,8 @@ MountController::MountController() // Constructor initializes motors and state
                      // - SW4: opposite end-stop
                      //
                      // +1 blocks travel toward the SW4 side, -1 blocks toward the SW1 side.
-                     true,  SwitchId::SW4, +1,  // VERT
                      true,  SwitchId::SW5, -1, // JAUNE
+                     true,  SwitchId::SW4, +1,  // VERT
                      43000}, // Fallback span if no switches: 43000 ticks
                  buildCalibrationDec(),
                  buildPrecisionCommon()),
@@ -221,8 +222,9 @@ MountController::MountController() // Constructor initializes motors and state
                  buildRaPid(),
                  buildRuntimeCommon(),
                 LimitConfig{
-                    true,  SwitchId::SW3, -1, // ORANGE
-                    true,  SwitchId::SW6, +1, // BLEU
+                    true,  SwitchId::SW6, -1, // BLEU     
+                    true,  SwitchId::SW3, +1, // ORANGE
+             
                     600000},
                 buildCalibrationRa(),
                 buildPrecisionCommon()),
@@ -245,12 +247,14 @@ MountController::MountController() // Constructor initializes motors and state
       m_lastPrintedRaState(MotorState::UNINITIALIZED),
       m_lastPrintedDecState(MotorState::UNINITIALIZED),
       m_lastPrintedFocState(MotorState::UNINITIALIZED),
-      m_selfTest{false, NULL, 0, 0, 0, 0},
-      m_calibrationLaunch{false, 0, 0},
       m_debugFocusActive(false),
       m_debugStartMs(0),
       m_lastDebugPrintMs(0),
-      m_emitDoneWhenReady(false) {}
+      m_emitDoneWhenReady(false),
+      m_emitFocusDoneWhenReady(false),
+      m_lastCommandWasFocus(false),
+      m_selfTest{false, NULL, 0, 0, 0, 0},
+      m_calibrationLaunch{false, 0, 0} {}
 
 void MountController::begin() { // Initializes hardware and starts calibration
   // Silent PWM setup
@@ -431,6 +435,8 @@ bool MountController::processCommand(const SerialCommand& cmd) {
     case CommandAction::STOP_ALL:
       emergencyStopAll();
       m_emitDoneWhenReady = false;
+      m_emitFocusDoneWhenReady = false;
+      m_lastCommandWasFocus = false;
       return true;
 
     case CommandAction::MOVE_ABSOLUTE: {
@@ -446,7 +452,14 @@ bool MountController::processCommand(const SerialCommand& cmd) {
         Serial.println(cmd.targetTicks);
       }
       if (ok) {
-        m_emitDoneWhenReady = true;
+        if (cmd.motor == MotorSelector::MOTOR_FOC) {
+          // Focus completion is acknowledged independently from global mount READY.
+          m_emitFocusDoneWhenReady = true;
+          m_lastCommandWasFocus = true;
+        } else {
+          m_emitDoneWhenReady = true;
+          m_lastCommandWasFocus = false;
+        }
       }
       return ok;
     }
@@ -464,12 +477,15 @@ bool MountController::processCommand(const SerialCommand& cmd) {
         }
         return false;
       }
-      m_emitDoneWhenReady = true;
+      m_emitFocusDoneWhenReady = true;
+      m_lastCommandWasFocus = true;
       return true;
 
     case CommandAction::CALIBRATE_ALL:
       startParallelCalibration();
       m_emitDoneWhenReady = true;
+      m_emitFocusDoneWhenReady = false;
+      m_lastCommandWasFocus = false;
       return true;
 
     case CommandAction::CALIBRATE_ONE:
@@ -480,6 +496,8 @@ bool MountController::processCommand(const SerialCommand& cmd) {
         return false;
       }
       m_emitDoneWhenReady = true;
+      m_emitFocusDoneWhenReady = false;
+      m_lastCommandWasFocus = false;
       return true;
 
     case CommandAction::MOTION_SELF_TEST:
@@ -666,7 +684,21 @@ void MountController::update() {
       Serial.println(0);
       continue;
     }
-    Serial.println(processCommand(command) ? 1 : 0);
+    const bool accepted = processCommand(command);
+    if (!accepted) {
+      Serial.println(0);
+      continue;
+    }
+
+    // Focus commands include current tick in ACK1 for better host-side tracking.
+    if ((command.action == CommandAction::MOVE_ABSOLUTE ||
+         command.action == CommandAction::MOVE_WITH_SPEED) &&
+        command.motor == MotorSelector::MOTOR_FOC) {
+      Serial.print(F("1,FOC,"));
+      Serial.println(m_motorFoc.readTicks());
+    } else {
+      Serial.println(1);
+    }
   }
 
   const unsigned long nowMs = millis();
@@ -679,15 +711,26 @@ void MountController::update() {
 
   if (m_state == MountState::ERROR) {
     m_emitDoneWhenReady = false;
+    m_emitFocusDoneWhenReady = false;
+    m_lastCommandWasFocus = false;
   }
 
   // Completion handshake for host software:
   // - 0: rejected (already emitted in command parser loop)
   // - 1: accepted (already emitted in command parser loop)
-  // - 2: done (emitted once when mount reaches READY after an accepted command)
+  // - 2: done
+  //   * focus commands: emitted when focus axis reaches READY (independent from mount state)
+  //   * other commands: emitted when mount reaches READY
+  if (m_emitFocusDoneWhenReady && m_motorFoc.readState() == MotorState::READY) {
+    Serial.print(F("2,FOC,"));
+    Serial.println(m_motorFoc.readTicks());
+    m_emitFocusDoneWhenReady = false;
+    m_lastCommandWasFocus = false;
+  }
   if (m_emitDoneWhenReady && m_state == MountState::READY) {
     Serial.println(2);
     m_emitDoneWhenReady = false;
+    m_lastCommandWasFocus = false;
   }
 
   emitDebug(nowMs);

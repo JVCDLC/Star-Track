@@ -47,9 +47,13 @@ BRIDGE_PIN = "1234"
 CAPTURE_ROOT = Path("startrack_img")
 VISION_INIT_SECONDS = 8.0
 EXCHANGE_LOG_FILE = Path(__file__).resolve().parent / "exchange.log"
+SERIAL_EXCHANGE_LOG_FILE = Path(__file__).resolve().parent / "serial_exchange.log"
+VISION_DEBUG_LOG_FILE = Path(__file__).resolve().parent / "vision_focus_debug.log"
 EXCHANGE_LOG_LIMIT = 2000
+SERIAL_EXCHANGE_LOG_LIMIT = 6000
+VISION_DEBUG_EVENT_LIMIT = 20000
 BACKGROUND_LOOP_INTERVAL_S = 0.05
-CALIBRATION_COMMAND_TIMEOUT_S = 45.0
+CALIBRATION_COMMAND_TIMEOUT_S = 180.0
 
 CATALOG = {
     "tab-solar": [
@@ -675,14 +679,20 @@ class VisionCoordinator:
         self.tracking_available = False
 
         # Autofocus sweep state
-        self.pass_speeds = [500.0, 250.0, 120.0]
-        self.pass_ranges = [
-            (0.0, self.TOTAL_FOCUS_STEPS),
-            (0.0, self.TOTAL_FOCUS_STEPS),
-            (0.0, self.TOTAL_FOCUS_STEPS),
-        ]
+        self.pass_speeds = [1000.0, 600.0, 350.0]
+        self.pass_windows = [self.TOTAL_FOCUS_STEPS, 3000.0, 1750.0]
+        self.pass_ranges = []
         self.current_pass = 0
         self.pending_focus_command = None
+        self.pending_sent_at = 0.0
+        self.pending_ack1_timeout_s = 1.2
+        self.pending_ack1_received = False
+        self.pending_ack1_at = 0.0
+        self.pending_action = None
+        self.pending_target_step = 0.0
+        self.pending_speed = 0.0
+        self.pending_retry_count = 0
+        self.pending_done_timeout_s = 20.0
         self.sweep_samples = []
         self.sweep_started_at = 0.0
         self.sweep_start_step = 0.0
@@ -692,9 +702,109 @@ class VisionCoordinator:
         self.last_sweep_sample_count = 0
         self.last_focus_error = ""
         self.autofocus_retry_count = 0
+        self.last_best_sample_index = -1
+        self.last_best_sample_score = -1.0
+        self.focus_eval_counter = 0
+        self.debug_events = deque(maxlen=VISION_DEBUG_EVENT_LIMIT)
+        self.sweep_history = deque(maxlen=20)
+        self.debug_log_file = VISION_DEBUG_LOG_FILE
+        self._reset_pass_ranges()
 
     def _manual_to_step(self):
         return (float(self.manual_value) / 100.0) * self.TOTAL_FOCUS_STEPS
+
+    def _record_focus_debug(self, event_type, **payload):
+        event = {
+            "ts": utc_now_iso(),
+            "type": str(event_type),
+            "stage": str(self.stage),
+            "active": bool(self.active),
+            "ready": bool(self.ready),
+            "pass_index": int(self.current_pass + 1),
+            "pending": self.pending_focus_command,
+        }
+        event.update(payload or {})
+        self.debug_events.append(event)
+        try:
+            self.debug_log_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.debug_log_file.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _reset_pass_ranges(self):
+        self.pass_ranges = [
+            (0.0, self.TOTAL_FOCUS_STEPS),
+            (0.0, self.TOTAL_FOCUS_STEPS),
+            (0.0, self.TOTAL_FOCUS_STEPS),
+        ]
+
+    def _estimate_step_from_command_time(self, now_ts):
+        start = float(self.sweep_start_step)
+        target = float(self.sweep_target_step)
+        distance = abs(target - start)
+        speed = max(1.0, float(self.pass_speeds[self.current_pass]))
+        expected_duration = max(0.001, distance / speed)
+        ratio = _clamp_float((float(now_ts) - float(self.sweep_started_at)) / expected_duration, 0.0, 1.0)
+        return float(start + ((target - start) * ratio))
+
+    def _effective_capture_time(self, sample_ts):
+        exposure_us = 0.0
+        try:
+            exposure_us = float(state.data.get("camera", {}).get("exposure", 0.0))
+        except Exception:
+            exposure_us = 0.0
+        # Approximate center-of-exposure timestamp.
+        return float(sample_ts) - max(0.0, (exposure_us * 1e-6) * 0.5), exposure_us
+
+    def _clear_pending_focus(self):
+        self.pending_focus_command = None
+        self.pending_sent_at = 0.0
+        self.pending_ack1_received = False
+        self.pending_ack1_at = 0.0
+        self.pending_action = None
+        self.pending_target_step = 0.0
+        self.pending_speed = 0.0
+        self.pending_retry_count = 0
+
+    def _resend_pending_focus(self, link, reason):
+        action = int(self.pending_action or 0)
+        target = float(self.pending_target_step)
+        sent = False
+        if action == 1:
+            sent = bool(link.send_command(1, "FOC", int(round(target))))
+        elif action == 2:
+            sent = bool(link.send_command(2, "FOC", int(round(target)), float(self.pending_speed)))
+        if sent:
+            self.pending_retry_count += 1
+            self.pending_sent_at = time.monotonic()
+            self.pending_ack1_received = False
+            self.pending_ack1_at = 0.0
+            print(
+                "[VISION] Re-sent focus command "
+                f"(action={action}, target={int(round(target))}, reason={reason}, retry={self.pending_retry_count})."
+            )
+            self._record_focus_debug(
+                "focus_command_resent",
+                reason=str(reason),
+                retry_count=int(self.pending_retry_count),
+                action=action,
+                target_step=round(target, 3),
+                speed_ticks_per_s=round(float(self.pending_speed), 3),
+            )
+        else:
+            self._record_focus_debug(
+                "focus_command_resend_failed",
+                reason=str(reason),
+                retry_count=int(self.pending_retry_count),
+                action=action,
+                target_step=round(target, 3),
+            )
+            print(
+                "[VISION] Failed to resend focus command "
+                f"(action={action}, target={int(round(target))}, reason={reason})."
+            )
+        return sent
 
     def _update_tracking_error(self, frame):
         if frame is None:
@@ -758,7 +868,27 @@ class VisionCoordinator:
 
         # Collect focus score samples only while the sweep command is active.
         if self.active and self.pending_focus_command == "SWEEP":
-            self.sweep_samples.append((time.monotonic(), float(self.focus_score)))
+            sample_ts = time.monotonic()
+            effective_ts, exposure_us = self._effective_capture_time(sample_ts)
+            self.focus_eval_counter += 1
+            sample = {
+                "sample_id": int(self.focus_eval_counter),
+                "ts": float(sample_ts),
+                "effective_ts": float(effective_ts),
+                "score": float(self.focus_score),
+                "pass_index": int(self.current_pass + 1),
+                "step_estimate_cmd": float(self._estimate_step_from_command_time(sample_ts)),
+                "exposure_us": float(exposure_us),
+            }
+            self.sweep_samples.append(sample)
+            self._record_focus_debug(
+                "frame_evaluated",
+                sample_id=sample["sample_id"],
+                sample_index=int(len(self.sweep_samples) - 1),
+                focus_score=round(sample["score"], 3),
+                step_estimate_cmd=round(sample["step_estimate_cmd"], 3),
+                exposure_us=round(float(exposure_us), 3),
+            )
 
         if not self.active:
             self.stage = "waiting_hardware_calibration"
@@ -775,6 +905,14 @@ class VisionCoordinator:
         self.current_focus_step = 0.0
         self.current_pass = 0
         self.pending_focus_command = None
+        self.pending_sent_at = 0.0
+        self.pending_ack1_received = False
+        self.pending_ack1_at = 0.0
+        self.pending_action = None
+        self.pending_target_step = 0.0
+        self.pending_speed = 0.0
+        self.pending_retry_count = 0
+        self.pending_done_timeout_s = 20.0
         self.sweep_samples = []
         self.sweep_started_at = 0.0
         self.sweep_start_step = 0.0
@@ -784,41 +922,144 @@ class VisionCoordinator:
         self.last_sweep_sample_count = 0
         self.last_focus_error = ""
         self.autofocus_retry_count = 0
-        self.pass_ranges = [
-            (0.0, self.TOTAL_FOCUS_STEPS),
-            (0.0, self.TOTAL_FOCUS_STEPS),
-            (0.0, self.TOTAL_FOCUS_STEPS),
-        ]
+        self.last_best_sample_index = -1
+        self.last_best_sample_score = -1.0
+        self._reset_pass_ranges()
+        self._record_focus_debug(
+            "autofocus_start",
+            pass_speeds=list(self.pass_speeds),
+            pass_windows=list(self.pass_windows),
+            pass_ranges=list(self.pass_ranges),
+        )
+
+    def stop_for_hardware_reset(self):
+        # Hardware reboot invalidates current autofocus handshake state.
+        self.active = False
+        self.ready = False
+        self.stage = "waiting_hardware_calibration"
+        self.initialized_at = ""
+        self.pending_focus_command = None
+        self.pending_sent_at = 0.0
+        self.pending_ack1_received = False
+        self.pending_ack1_at = 0.0
+        self.pending_action = None
+        self.pending_target_step = 0.0
+        self.pending_speed = 0.0
+        self.pending_retry_count = 0
+        self.pending_done_timeout_s = 20.0
+        self.current_pass = 0
+        self.sweep_samples = []
+        self.sweep_started_at = 0.0
+        self.last_focus_error = ""
+        self._reset_pass_ranges()
+        self._record_focus_debug("autofocus_stopped_hardware_reset")
+        if self.mode == "manual":
+            self.current_focus_step = self._manual_to_step()
 
     def _set_next_pass_range(self, pass_index, best_step):
-        if pass_index == 0:
-            pad = 280.0
-        elif pass_index == 1:
-            pad = 90.0
-        else:
+        if pass_index not in (0, 1):
             return
-        low = max(0.0, float(best_step) - pad)
-        high = min(self.TOTAL_FOCUS_STEPS, float(best_step) + pad)
+        target_width = float(self._desired_pass_span(pass_index + 1))
+        low, high = self._centered_window(float(best_step), target_width)
         self.pass_ranges[pass_index + 1] = (low, high)
+        self._record_focus_debug(
+            "pass_range_updated",
+            next_pass=int(pass_index + 2),
+            source_best_step=round(float(best_step), 3),
+            target_width=round(target_width, 3),
+            range_start=round(low, 3),
+            range_end=round(high, 3),
+        )
+
+    def _desired_pass_span(self, pass_index):
+        if pass_index < 0 or pass_index >= len(self.pass_windows):
+            return float(self.TOTAL_FOCUS_STEPS)
+        return float(max(1.0, min(float(self.pass_windows[pass_index]), float(self.TOTAL_FOCUS_STEPS))))
+
+    def _centered_window(self, center_step, width):
+        target_width = float(max(1.0, min(float(width), float(self.TOTAL_FOCUS_STEPS))))
+        pad = target_width / 2.0
+        low = float(center_step) - pad
+        high = float(center_step) + pad
+        # Keep a constant sweep width by shifting the window when close to edges.
+        if low < 0.0:
+            high -= low
+            low = 0.0
+        if high > self.TOTAL_FOCUS_STEPS:
+            low -= (high - self.TOTAL_FOCUS_STEPS)
+            high = self.TOTAL_FOCUS_STEPS
+        low = max(0.0, low)
+        high = min(self.TOTAL_FOCUS_STEPS, high)
+        # Final safety to guarantee exact requested width when mathematically possible.
+        span = float(high - low)
+        if abs(span - target_width) > 0.001 and target_width <= float(self.TOTAL_FOCUS_STEPS):
+            if low <= 0.0:
+                high = min(float(self.TOTAL_FOCUS_STEPS), low + target_width)
+            elif high >= float(self.TOTAL_FOCUS_STEPS):
+                low = max(0.0, high - target_width)
+        return float(low), float(high)
 
     def _send_focus_position(self, link, target_step, stage_name):
         sent = link.send_command(1, "FOC", int(round(target_step)))
         if sent:
             self.pending_focus_command = "REWIND" if "rewind" in stage_name else "LOCK"
+            self.pending_sent_at = time.monotonic()
+            self.pending_ack1_received = False
+            self.pending_ack1_at = 0.0
+            self.pending_action = 1
+            self.pending_target_step = float(target_step)
+            self.pending_speed = 0.0
+            self.pending_retry_count = 0
+            self.pending_done_timeout_s = 20.0
             self.stage = stage_name
             self.current_focus_step = float(target_step)
+            self._record_focus_debug(
+                "focus_position_command_sent",
+                command_type=self.pending_focus_command,
+                stage_name=str(stage_name),
+                target_step=round(float(target_step), 3),
+            )
+        else:
+            self._record_focus_debug(
+                "focus_position_command_failed",
+                stage_name=str(stage_name),
+                target_step=round(float(target_step), 3),
+            )
         return sent
 
     def _send_focus_sweep(self, link, start_step, target_step, speed):
         sent = link.send_command(2, "FOC", int(round(target_step)), float(speed))
         if sent:
             self.pending_focus_command = "SWEEP"
+            self.pending_sent_at = time.monotonic()
+            self.pending_ack1_received = False
+            self.pending_ack1_at = 0.0
+            self.pending_action = 2
+            self.pending_target_step = float(target_step)
+            self.pending_speed = float(speed)
+            self.pending_retry_count = 0
+            self.pending_done_timeout_s = 18.0
             self.stage = f"focus_sweep_pass_{self.current_pass + 1}"
             self.sweep_samples = []
             self.sweep_started_at = time.monotonic()
             self.sweep_start_step = float(start_step)
             self.sweep_target_step = float(target_step)
             self.current_focus_step = float(start_step)
+            self._record_focus_debug(
+                "focus_sweep_command_sent",
+                pass_index=int(self.current_pass + 1),
+                start_step=round(float(start_step), 3),
+                target_step=round(float(target_step), 3),
+                speed_ticks_per_s=round(float(speed), 3),
+            )
+        else:
+            self._record_focus_debug(
+                "focus_sweep_command_failed",
+                pass_index=int(self.current_pass + 1),
+                start_step=round(float(start_step), 3),
+                target_step=round(float(target_step), 3),
+                speed_ticks_per_s=round(float(speed), 3),
+            )
         return sent
 
     def _finalize_sweep(self):
@@ -830,13 +1071,18 @@ class VisionCoordinator:
 
         if not self.sweep_samples:
             self.last_focus_error = "No focus samples captured during sweep."
+            self._record_focus_debug("focus_sweep_error", error=self.last_focus_error)
             return None
 
         direction = 1.0 if self.sweep_target_step >= self.sweep_start_step else -1.0
         best_step = self.sweep_start_step
         best_score = -1.0
+        best_index = -1
+        mapped_samples = []
 
-        for sample_ts, score in self.sweep_samples:
+        for idx, sample in enumerate(self.sweep_samples):
+            sample_ts = float(sample.get("effective_ts", sample.get("ts", self.sweep_started_at)))
+            score = float(sample.get("score", 0.0))
             ratio = _clamp_float((sample_ts - self.sweep_started_at) / duration, 0.0, 1.0)
             estimated_step = self.sweep_start_step + direction * (self.last_sweep_measured_speed * duration * ratio)
             if direction > 0:
@@ -844,14 +1090,53 @@ class VisionCoordinator:
             else:
                 estimated_step = max(self.sweep_target_step, min(self.sweep_start_step, estimated_step))
 
+            mapped = {
+                "sample_id": int(sample.get("sample_id", idx)),
+                "sample_index": int(idx),
+                "relative_t_s": round(float(sample_ts - self.sweep_started_at), 6),
+                "capture_t_s": round(float(sample.get("ts", sample_ts) - self.sweep_started_at), 6),
+                "score": round(score, 6),
+                "step_estimate_cmd": round(float(sample.get("step_estimate_cmd", estimated_step)), 6),
+                "step_estimate_measured": round(float(estimated_step), 6),
+                "exposure_us": round(float(sample.get("exposure_us", 0.0)), 3),
+            }
+            mapped_samples.append(mapped)
+            self._record_focus_debug("frame_mapped", **mapped)
+
             if score >= best_score:
                 best_score = score
                 best_step = estimated_step
+                best_index = idx
 
         self.last_sweep_sample_count = len(self.sweep_samples)
         self.best_focus_score = max(self.best_focus_score, best_score)
         self.best_focus_step = float(best_step)
         self.current_focus_step = float(best_step)
+        self.last_best_sample_index = int(best_index)
+        self.last_best_sample_score = float(best_score)
+        history_entry = {
+            "ts": utc_now_iso(),
+            "pass_index": int(self.current_pass + 1),
+            "start_step": round(float(self.sweep_start_step), 6),
+            "target_step": round(float(self.sweep_target_step), 6),
+            "speed_ticks_per_s": round(float(self.pass_speeds[self.current_pass]), 6),
+            "duration_s": round(float(duration), 6),
+            "sample_count": int(len(mapped_samples)),
+            "best_sample_index": int(best_index),
+            "best_score": round(float(best_score), 6),
+            "best_step": round(float(best_step), 6),
+            "samples": mapped_samples,
+        }
+        self.sweep_history.append(history_entry)
+        self._record_focus_debug(
+            "focus_sweep_finalized",
+            pass_index=int(self.current_pass + 1),
+            duration_s=round(float(duration), 6),
+            sample_count=int(len(mapped_samples)),
+            best_sample_index=int(best_index),
+            best_score=round(float(best_score), 6),
+            best_step=round(float(best_step), 6),
+        )
         return best_step
 
     def handle_arduino_events(self, events, link):
@@ -866,12 +1151,25 @@ class VisionCoordinator:
 
             code = event.get("code")
             action = event.get("action")
+            raw_position = event.get("position")
+            try:
+                position = float(raw_position) if raw_position is not None else None
+            except Exception:
+                position = None
+            self._record_focus_debug(
+                "focus_ack_received",
+                code=int(code) if code in (0, 1, 2) else code,
+                action=action,
+                motor=str(event.get("motor", "")),
+                cmd=event.get("cmd"),
+                position=position,
+            )
 
             # Focus command rejected by firmware -> retry a limited number of times.
             if code == 0:
                 failed_command = self.pending_focus_command
                 self.autofocus_retry_count += 1
-                self.pending_focus_command = None
+                self._clear_pending_focus()
                 if self.autofocus_retry_count <= 3:
                     if failed_command == "LOCK":
                         self.stage = f"focus_lock_retry_{self.autofocus_retry_count}"
@@ -882,28 +1180,107 @@ class VisionCoordinator:
                     self.last_focus_error = "Focus command rejected repeatedly."
                     self.stage = "focus_error"
                     self.active = False
+                    self._record_focus_debug("focus_error", error=self.last_focus_error)
+                continue
+
+            if code == 1:
+                if self.pending_focus_command and (
+                    self.pending_action is None
+                    or action in (self.pending_action, None)
+                ):
+                    if not self.pending_ack1_received:
+                        self.pending_ack1_received = True
+                        self.pending_ack1_at = time.monotonic()
+                        pos_txt = (
+                            str(int(round(position)))
+                            if position is not None
+                            else "unknown"
+                        )
+                        print(
+                            f"[VISION] Ack 1 received for {self.pending_focus_command} "
+                            f"(action={self.pending_action}, pos={pos_txt})."
+                        )
+                        self._record_focus_debug(
+                            "focus_ack1_received",
+                            pending=self.pending_focus_command,
+                            action=self.pending_action,
+                        )
                 continue
 
             if code != 2:
                 continue
 
+            if self.pending_focus_command and (
+                self.pending_action is None
+                or action in (self.pending_action, None)
+            ):
+                if not self.pending_ack1_received:
+                    self.pending_ack1_received = True
+                    self.pending_ack1_at = time.monotonic()
+                    self._record_focus_debug(
+                        "focus_ack1_inferred_from_ack2",
+                        pending=self.pending_focus_command,
+                        action=self.pending_action,
+                    )
+
             # Done for rewind/start positioning.
-            if action == 1 and self.pending_focus_command == "REWIND":
+            if self.pending_focus_command == "REWIND":
                 self.autofocus_retry_count = 0
-                self.pending_focus_command = None
-                start_step, target_step = self.pass_ranges[self.current_pass]
+                preferred_target_step = float(self.pass_ranges[self.current_pass][1])
+                start_step = (
+                    float(position)
+                    if position is not None
+                    else float(self.pass_ranges[self.current_pass][0])
+                )
+                desired_span = float(self._desired_pass_span(self.current_pass))
+                target_step = preferred_target_step
+                # Enforce full sweep width from the *actual* start position when possible.
+                # If forward range does not fit, reverse sweep to keep full span.
+                forward_target = float(start_step + desired_span)
+                backward_target = float(start_step - desired_span)
+                if 0.0 <= forward_target <= float(self.TOTAL_FOCUS_STEPS):
+                    target_step = forward_target
+                elif 0.0 <= backward_target <= float(self.TOTAL_FOCUS_STEPS):
+                    target_step = backward_target
+                else:
+                    target_step = float(max(0.0, min(float(self.TOTAL_FOCUS_STEPS), preferred_target_step)))
+                self.pass_ranges[self.current_pass] = (start_step, float(target_step))
+                self._clear_pending_focus()
+                self.current_focus_step = float(start_step)
                 speed = self.pass_speeds[self.current_pass]
+                effective_span = abs(float(target_step) - float(start_step))
+                print(
+                    "[VISION] Ack 2 received for REWIND "
+                    f"(pass={self.current_pass + 1}, start={int(round(start_step))}, "
+                    f"target={int(round(target_step))}, span={int(round(effective_span))}, "
+                    f"speed={int(round(speed))})."
+                )
+                self._record_focus_debug(
+                    "focus_rewind_done",
+                    start_step=round(float(start_step), 6),
+                    target_step=round(float(target_step), 6),
+                    effective_span_ticks=round(float(effective_span), 6),
+                    requested_span_ticks=round(float(desired_span), 6),
+                    speed_ticks_per_s=round(float(speed), 6),
+                )
                 self._send_focus_sweep(link, start_step, target_step, speed)
                 continue
 
             # Done for sweep move.
-            if action == 2 and self.pending_focus_command == "SWEEP":
+            if self.pending_focus_command == "SWEEP":
                 self.autofocus_retry_count = 0
-                self.pending_focus_command = None
+                if position is not None:
+                    self.sweep_target_step = float(position)
+                print(
+                    "[VISION] Ack 2 received for SWEEP "
+                    f"(pass={self.current_pass + 1}, final_pos={int(round(self.sweep_target_step))})."
+                )
+                self._clear_pending_focus()
                 best_step = self._finalize_sweep()
                 if best_step is None:
                     self.stage = "focus_error"
                     self.active = False
+                    self._record_focus_debug("focus_error", error=self.last_focus_error)
                     continue
 
                 if self.current_pass < 2:
@@ -915,20 +1292,60 @@ class VisionCoordinator:
                 continue
 
             # Done for final lock.
-            if action == 1 and self.pending_focus_command == "LOCK":
+            if self.pending_focus_command == "LOCK":
                 self.autofocus_retry_count = 0
-                self.pending_focus_command = None
+                self._clear_pending_focus()
                 self.ready = True
                 self.stage = "tracking"
                 self.active = True
                 self.initialized_at = utc_now_iso()
-                if self.mode == "auto":
+                print("[VISION] Ack 2 received for LOCK; autofocus complete.")
+                if position is not None:
+                    self.current_focus_step = float(position)
+                    if self.mode == "auto":
+                        self.best_focus_step = float(position)
+                elif self.mode == "auto":
                     self.current_focus_step = self.best_focus_step
                 else:
                     self.current_focus_step = self._manual_to_step()
+                self._record_focus_debug(
+                    "autofocus_complete",
+                    best_step=round(float(self.best_focus_step), 6),
+                    best_score=round(float(self.best_focus_score), 6),
+                )
 
     def tick_autofocus(self, link):
-        if not self.active or self.ready or self.pending_focus_command is not None:
+        if not self.active or self.ready:
+            return
+
+        if self.pending_focus_command is not None:
+            if self.pending_sent_at > 0.0:
+                now = time.monotonic()
+                sent_elapsed = now - float(self.pending_sent_at)
+                if not self.pending_ack1_received:
+                    if sent_elapsed > float(self.pending_ack1_timeout_s):
+                        if self.pending_retry_count < 3 and self._resend_pending_focus(link, "ack1_timeout"):
+                            return
+                        self.last_focus_error = (
+                            f"No ACK 1 for '{self.pending_focus_command}' after retries."
+                        )
+                        self.stage = "focus_error"
+                        self.active = False
+                        self._record_focus_debug("focus_error", error=self.last_focus_error)
+                        return
+                else:
+                    done_elapsed = now - float(self.pending_ack1_at)
+                    if done_elapsed > float(self.pending_done_timeout_s):
+                        if self.pending_retry_count < 3 and self._resend_pending_focus(link, "ack2_timeout"):
+                            return
+                        self.last_focus_error = (
+                            f"No ACK 2 for '{self.pending_focus_command}' within "
+                            f"{self.pending_done_timeout_s:.1f}s."
+                        )
+                        self.stage = "focus_error"
+                        self.active = False
+                        self._record_focus_debug("focus_error", error=self.last_focus_error)
+                        return
             return
 
         if self.current_pass >= len(self.pass_ranges):
@@ -964,6 +1381,44 @@ class VisionCoordinator:
             "sweep_samples": int(self.last_sweep_sample_count),
             "last_error": self.last_focus_error,
             "focus_range_ticks": int(self.TOTAL_FOCUS_STEPS),
+            "pass_speeds": [round(float(v), 3) for v in self.pass_speeds],
+            "pass_ranges": [
+                [round(float(low), 3), round(float(high), 3)]
+                for (low, high) in self.pass_ranges
+            ],
+            "pending_focus_command": self.pending_focus_command,
+            "pending_action": self.pending_action,
+            "pending_ack1_received": bool(self.pending_ack1_received),
+            "pending_retry_count": int(self.pending_retry_count),
+            "pending_done_timeout_s": round(float(self.pending_done_timeout_s), 3),
+            "pending_elapsed_s": (
+                round(float(max(0.0, time.monotonic() - self.pending_sent_at)), 3)
+                if self.pending_focus_command and self.pending_sent_at > 0.0
+                else 0.0
+            ),
+            "best_sample_index": int(self.last_best_sample_index),
+            "best_sample_score": round(float(self.last_best_sample_score), 3),
+            "debug_events_count": int(len(self.debug_events)),
+            "history_count": int(len(self.sweep_history)),
+        }
+
+    def debug_snapshot(self, event_limit=500, history_limit=10, sample_limit=2000):
+        e_lim = max(1, min(int(event_limit), 50000))
+        h_lim = max(1, min(int(history_limit), 50))
+        s_lim = max(1, min(int(sample_limit), 100000))
+        history_out = []
+        for item in list(self.sweep_history)[-h_lim:]:
+            samples = list(item.get("samples", []))
+            row = {k: v for k, v in item.items() if k != "samples"}
+            row["samples_total"] = int(len(samples))
+            row["samples"] = samples[-s_lim:]
+            history_out.append(row)
+        return {
+            "state": self.to_payload(),
+            "recent_events": list(self.debug_events)[-e_lim:],
+            "history": history_out,
+            "current_sweep_samples": list(self.sweep_samples)[-s_lim:],
+            "debug_log_file": str(self.debug_log_file),
         }
 
 
@@ -984,13 +1439,17 @@ class RuntimeOrchestrator:
     def __init__(self):
         self.hw_calibration_requested = False
         self.hw_calibration_requested_at = 0.0
+        self.hw_last_progress_at = 0.0
         self.hw_calibration_accepted = False
+        self.hw_calibration_started = False
         self.hw_calibrated = False
         self.hw_calibration_retries = 0
         self.hw_next_retry_at = 0.0
+        self.focus_only_mode = False
         self.focus_calibration_started = False
         self.focus_calibrated = False
         self.last_handshake_code = None
+        self.error_recovery_last_at = 0.0
 
     def reset(self):
         self.__init__()
@@ -1463,8 +1922,18 @@ def is_command_allowed_during_init(packet_type):
         "SYNC_CLOCK",
         "TIMESTAMP",
         "DATETIME",
+        "JOYSTICK",
+        "MOTOR_SETTINGS",
+        "MISSION",
+        "COMMAND",
         "CAMERA_SETTINGS",
+        "FOCUS_SETTINGS",
+        "PHOTO_REQUEST",
+        "VIDEO_REQUEST",
         "RUNTIME_MODES",
+        "AUTOFOCUS_RECALIBRATE",
+        "AUTOFOCUS_TEST",
+        "SERIAL_RAW",
         "EMERGENCY_STOP",
     }
 
@@ -1491,7 +1960,8 @@ def refresh_system_status():
     focus_ready = bool(vision_status.get("ready", False))
     astro_ready = bool(astro_status.get("ready", False))
 
-    controls_ready = bool(hardware_calibrated and focus_ready and astro_ready)
+    # Do not block general UI controls on autofocus completion.
+    controls_ready = bool(hardware_calibrated and astro_ready)
     if controls_ready:
         message = "All systems initialized."
     else:
@@ -1523,12 +1993,21 @@ def refresh_system_status():
             "motor_state", {"RA": "UNKNOWN", "DEC": "UNKNOWN", "FOC": "UNKNOWN"}
         ),
     }
+    catalog_has_altitude = any(
+        isinstance(entry.get("altitude_deg"), (int, float))
+        for entries in state.catalog.values()
+        for entry in entries
+    )
+
     state.data["system"] = {
         "hardware_calibrated": hardware_calibrated,
         "vision_ready": bool(vision_status["ready"]),
         "astronomic_ready": astro_ready,
         "controls_ready": controls_ready,
-        "catalog_ready": any(len(items) for items in state.catalog.values()),
+        "catalog_ready": bool(
+            catalog_has_altitude
+            or any(len(items) for items in state.catalog.values())
+        ),
         "message": message,
     }
     return controls_ready
@@ -1544,15 +2023,24 @@ def compute_catalog_hash(catalog):
 async def refresh_catalog_if_due(force=False):
     global catalog_refresh_deadline, catalog_last_hash
     now = time.monotonic()
+    if not force and astro_runtime is not None:
+        try:
+            astro_status = astro_runtime.status()
+            cache_rows = int((astro_status.get("catalog_cache") or {}).get("rows", 0))
+            if bool(astro_status.get("ready")) and bool(astro_status.get("skyfield_ready")) and cache_rows <= 0:
+                force = True
+        except Exception:
+            pass
     if not force and now < catalog_refresh_deadline:
         return
 
     if astro_runtime is None:
-        if state.catalog != CATALOG:
-            state.catalog = copy.deepcopy(CATALOG)
+        empty_catalog = {tab: [] for tab in CATALOG}
+        if state.catalog != empty_catalog:
+            state.catalog = empty_catalog
             catalog_last_hash = compute_catalog_hash(state.catalog)
             await broadcast_catalog()
-        catalog_refresh_deadline = now + 300.0
+        catalog_refresh_deadline = now + 30.0
         return
 
     try:
@@ -1582,7 +2070,15 @@ async def refresh_catalog_if_due(force=False):
     if next_hash != catalog_last_hash:
         catalog_last_hash = next_hash
         await broadcast_catalog()
-    catalog_refresh_deadline = now + max(5.0, float(delay or 60.0))
+    has_altitude = any(
+        isinstance(entry.get("altitude_deg"), (int, float))
+        for entries in next_catalog.values()
+        for entry in entries
+    )
+    if not has_altitude:
+        catalog_refresh_deadline = now + 2.0
+    else:
+        catalog_refresh_deadline = now + max(5.0, float(delay or 60.0))
 
 
 async def handle_photo_capture_request(source_ws=None):
@@ -1665,6 +2161,10 @@ async def execute_command(pkt, source_ws=None):
                 if entry.get("id") is not None
             }
             if str(requested_target) not in visible_ids:
+                print(
+                    "[MISSION] Rejected target not visible in catalog "
+                    f"(target={requested_target}, visible_count={len(visible_ids)})."
+                )
                 if source_ws is not None:
                     await safe_send(
                         source_ws,
@@ -1787,14 +2287,31 @@ async def execute_command(pkt, source_ws=None):
             )
         should_broadcast = True
 
-    elif ptype == "AUTOFOCUS_RECALIBRATE":
-        if not runtime_orchestrator.hw_calibrated:
+    elif ptype in {"AUTOFOCUS_RECALIBRATE", "AUTOFOCUS_TEST"}:
+        force_focus_only = bool(
+            ptype == "AUTOFOCUS_TEST"
+            or pkt.get("force_focus_only")
+            or pkt.get("focus_only")
+        )
+        if not force_focus_only and not runtime_orchestrator.hw_calibrated:
             if source_ws is not None:
                 await safe_send(
                     source_ws,
                     {"type": "TOAST", "msg": "Hardware calibration is not complete yet."},
                 )
             return
+        if force_focus_only:
+            runtime_orchestrator.focus_only_mode = True
+            runtime_orchestrator.hw_calibration_requested = True
+            runtime_orchestrator.hw_calibration_accepted = True
+            runtime_orchestrator.hw_calibrated = True
+            if source_ws is not None:
+                await safe_send(
+                    source_ws,
+                    {"type": "TOAST", "msg": "Autofocus test mode enabled (RA/DEC calibration bypassed)."},
+                )
+        else:
+            runtime_orchestrator.focus_only_mode = False
         vision_runtime.start_focus_calibration()
         runtime_orchestrator.focus_calibration_started = True
         runtime_orchestrator.focus_calibrated = False
@@ -1833,6 +2350,28 @@ async def execute_command(pkt, source_ws=None):
                     )
         state.data["runtime_modes"] = modes
         should_broadcast = True
+
+    elif ptype == "SERIAL_RAW":
+        command = str(pkt.get("command", "")).strip()
+        sent = False
+        if astro_runtime is not None and command:
+            try:
+                sent = bool(astro_runtime.motor_link.send_interactive(command))
+            except Exception:
+                sent = False
+        if source_ws is not None:
+            await safe_send(
+                source_ws,
+                {
+                    "type": "TOAST",
+                    "msg": (
+                        f"Serial command sent: {command}"
+                        if sent
+                        else "Failed to send serial command."
+                    ),
+                },
+            )
+        should_broadcast = False
 
     if should_broadcast:
         await broadcast_telemetry()
@@ -2116,7 +2655,7 @@ async def handle_websocket(request):
                 continue
 
             if ptype == "JOYSTICK":
-                if ws == state.joystick_owner:
+                if ws == state.joystick_owner or state.is_commander(ws):
                     await execute_command(pkt, source_ws=ws)
                 continue
 
@@ -2204,37 +2743,195 @@ async def debug_exchanges(request):
     return web.json_response({"events": state.exchange_snapshot(limit=limit)})
 
 
+async def debug_serial(request):
+    try:
+        limit = int(request.query.get("limit", "200"))
+    except ValueError:
+        limit = 200
+    if astro_runtime is None:
+        return web.json_response(
+            {"events": [], "status": {"available": False, "message": "Astronomic runtime unavailable."}}
+        )
+    try:
+        link = astro_runtime.motor_link
+        return web.json_response(
+            {
+                "events": link.serial_snapshot(limit=limit),
+                "status": {
+                    "available": True,
+                    "motor_link": link.status(),
+                },
+            }
+        )
+    except Exception as exc:
+        return web.json_response(
+            {"events": [], "status": {"available": False, "message": str(exc)}},
+            status=500,
+        )
+
+
+async def debug_serial_send(request):
+    if astro_runtime is None:
+        return web.json_response({"ok": False, "error": "Astronomic runtime unavailable."}, status=503)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    command = str(payload.get("command", "")).strip()
+    if not command:
+        return web.json_response({"ok": False, "error": "Missing 'command'."}, status=400)
+    try:
+        sent = bool(astro_runtime.motor_link.send_interactive(command))
+        return web.json_response({"ok": sent, "command": command, "motor_link": astro_runtime.motor_link.status()})
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+
+async def debug_vision(request):
+    try:
+        event_limit = int(request.query.get("event_limit", "500"))
+    except ValueError:
+        event_limit = 500
+    try:
+        history_limit = int(request.query.get("history_limit", "10"))
+    except ValueError:
+        history_limit = 10
+    try:
+        sample_limit = int(request.query.get("sample_limit", "2000"))
+    except ValueError:
+        sample_limit = 2000
+    try:
+        snapshot = vision_runtime.debug_snapshot(
+            event_limit=event_limit,
+            history_limit=history_limit,
+            sample_limit=sample_limit,
+        )
+        return web.json_response(snapshot)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
 async def handle_runtime_orchestration(vision_payload):
     if astro_runtime is None:
         return
+    if runtime_orchestrator.focus_only_mode:
+        runtime_orchestrator.hw_calibration_requested = True
+        runtime_orchestrator.hw_calibration_accepted = True
+        runtime_orchestrator.hw_calibrated = True
 
     link = astro_runtime.motor_link
     events = link.drain_events(limit=200)
+    boot_seen = False
+    calibration_progress_seen = False
+    calibration_ready_seen = False
+
+    for event in events:
+        if event.get("kind") != "debug":
+            continue
+        line_lower = str(event.get("line", "")).lower()
+        if not line_lower:
+            continue
+        if "dbg,boot" in line_lower:
+            boot_seen = True
+        if "mount=calibrating" in line_lower or "dbg,calib" in line_lower:
+            calibration_progress_seen = True
+        if "mount=ready" in line_lower or "calibration_done" in line_lower:
+            calibration_ready_seen = True
+
+    if boot_seen:
+        had_runtime_state = bool(
+            runtime_orchestrator.hw_calibration_requested
+            or runtime_orchestrator.hw_calibrated
+            or runtime_orchestrator.focus_calibration_started
+        )
+        runtime_orchestrator.reset()
+        vision_runtime.stop_for_hardware_reset()
+        if had_runtime_state:
+            print("[HW CAL] Arduino boot/reset detected; restarting initialization pipeline.")
 
     for event in events:
         if event.get("kind") != "ack":
             continue
         code = event.get("code")
         action = event.get("action")
-        runtime_orchestrator.last_handshake_code = code
+        motor = str(event.get("motor", "")).upper()
+        if code not in (0, 1, 2):
+            continue
+        is_hw_event = bool(
+            action == 3
+            or (
+                action is None
+                and motor not in {"RA", "DEC", "FOC"}
+                and runtime_orchestrator.hw_calibration_requested
+                and not runtime_orchestrator.hw_calibrated
+            )
+        )
+        if not is_hw_event:
+            continue
 
-        if action == 3:
-            if code == 1:
-                runtime_orchestrator.hw_calibration_accepted = True
-            elif code == 2:
-                runtime_orchestrator.hw_calibrated = True
-            elif code == 0:
-                runtime_orchestrator.hw_calibration_accepted = False
-                runtime_orchestrator.hw_next_retry_at = time.monotonic() + 1.0
+        event_now = time.monotonic()
+        runtime_orchestrator.last_handshake_code = code
+        if code == 1:
+            runtime_orchestrator.hw_calibration_accepted = True
+            runtime_orchestrator.hw_calibration_started = True
+            runtime_orchestrator.hw_calibration_requested_at = event_now
+            runtime_orchestrator.hw_last_progress_at = event_now
+            runtime_orchestrator.hw_next_retry_at = event_now + CALIBRATION_COMMAND_TIMEOUT_S
+            print("[HW CAL] Ack 1 received; calibration started/confirmed.")
+        elif code == 2:
+            was_calibrated = bool(runtime_orchestrator.hw_calibrated)
+            runtime_orchestrator.hw_calibration_accepted = True
+            runtime_orchestrator.hw_calibration_started = True
+            runtime_orchestrator.hw_calibrated = True
+            runtime_orchestrator.hw_last_progress_at = event_now
+            runtime_orchestrator.error_recovery_last_at = 0.0
+            if not was_calibrated:
+                print("[HW CAL] Ack 2 received; calibration complete.")
+        elif code == 0 and not runtime_orchestrator.hw_calibrated:
+            runtime_orchestrator.hw_calibration_accepted = False
+            runtime_orchestrator.hw_next_retry_at = event_now + 1.0
+
+    now = time.monotonic()
+    link_status = link.status()
+    link_system_state = str(link_status.get("system_state", "")).upper()
+    if link_system_state == "ERROR" and runtime_orchestrator.hw_calibrated:
+        if (now - float(runtime_orchestrator.error_recovery_last_at)) >= 5.0:
+            runtime_orchestrator.error_recovery_last_at = now
+            runtime_orchestrator.hw_calibrated = False
+            runtime_orchestrator.hw_calibration_requested = False
+            runtime_orchestrator.hw_calibration_accepted = False
+            runtime_orchestrator.hw_calibration_started = False
+            runtime_orchestrator.hw_next_retry_at = now
+            print("[HW CAL] Mount entered ERROR state; restarting calibration handshake.")
 
     # Hardware calibration handshake with graceful retry.
-    now = time.monotonic()
+    if (
+        runtime_orchestrator.hw_calibration_requested
+        and not runtime_orchestrator.hw_calibrated
+        and calibration_progress_seen
+    ):
+        runtime_orchestrator.hw_calibration_accepted = True
+        runtime_orchestrator.hw_calibration_started = True
+        runtime_orchestrator.hw_last_progress_at = now
+        runtime_orchestrator.hw_next_retry_at = now + CALIBRATION_COMMAND_TIMEOUT_S
+    if (
+        runtime_orchestrator.hw_calibration_requested
+        and not runtime_orchestrator.hw_calibrated
+        and calibration_ready_seen
+        and runtime_orchestrator.hw_calibration_started
+    ):
+        runtime_orchestrator.hw_calibration_accepted = True
+        runtime_orchestrator.hw_calibrated = True
+        runtime_orchestrator.hw_last_progress_at = now
+        print("[HW CAL] Calibration completed from debug state (mount=READY).")
+
     should_send_calib = False
     if not runtime_orchestrator.hw_calibration_requested:
         should_send_calib = True
     elif (
         runtime_orchestrator.hw_calibration_requested
         and not runtime_orchestrator.hw_calibrated
+        and not runtime_orchestrator.hw_calibration_accepted
         and now >= runtime_orchestrator.hw_next_retry_at
         and runtime_orchestrator.hw_calibration_retries > 0
     ):
@@ -2243,7 +2940,10 @@ async def handle_runtime_orchestration(vision_payload):
     if should_send_calib and not runtime_orchestrator.hw_calibrated:
         sent = link.send_command(3)
         runtime_orchestrator.hw_calibration_requested = bool(sent)
+        runtime_orchestrator.hw_calibration_accepted = False
+        runtime_orchestrator.hw_calibration_started = False
         runtime_orchestrator.hw_calibration_requested_at = now
+        runtime_orchestrator.hw_last_progress_at = now
         if sent:
             runtime_orchestrator.hw_calibration_retries += 1
             runtime_orchestrator.hw_next_retry_at = now + CALIBRATION_COMMAND_TIMEOUT_S
@@ -2259,25 +2959,41 @@ async def handle_runtime_orchestration(vision_payload):
         and not runtime_orchestrator.hw_calibrated
         and runtime_orchestrator.hw_calibration_accepted
     ):
-        elapsed = time.monotonic() - runtime_orchestrator.hw_calibration_requested_at
+        last_activity = max(
+            float(runtime_orchestrator.hw_calibration_requested_at),
+            float(runtime_orchestrator.hw_last_progress_at),
+        )
+        elapsed = time.monotonic() - last_activity
         if elapsed > CALIBRATION_COMMAND_TIMEOUT_S:
             # Do not force ERROR here; keep system alive and let UI remain accessible.
-            print("Warning: hardware calibration timeout waiting for done code 2.")
+            print(
+                "Warning: hardware calibration stalled "
+                f"({elapsed:.1f}s since last progress), retrying command (3)."
+            )
             runtime_orchestrator.hw_calibration_accepted = False
             runtime_orchestrator.hw_next_retry_at = time.monotonic() + 1.0
 
     # Backward-compatible fallback when firmware prints state but does not emit "2".
     last_dbg = link.status().get("last_debug_line", "")
+    dbg_lower = str(last_dbg).lower()
     if (
-        runtime_orchestrator.hw_calibration_accepted
+        runtime_orchestrator.hw_calibration_requested
         and not runtime_orchestrator.hw_calibrated
-        and "mount=READY" in str(last_dbg)
+        and runtime_orchestrator.hw_calibration_started
+        and ("calibrat" in dbg_lower)
+    ):
+        runtime_orchestrator.hw_calibration_accepted = True
+        runtime_orchestrator.hw_last_progress_at = time.monotonic()
+    if (
+        runtime_orchestrator.hw_calibration_requested
+        and not runtime_orchestrator.hw_calibrated
+        and runtime_orchestrator.hw_calibration_started
+        and ("mount=ready" in dbg_lower or "calibration_done" in dbg_lower)
     ):
         runtime_orchestrator.hw_calibrated = True
-
-    if runtime_orchestrator.hw_calibrated and not runtime_orchestrator.focus_calibration_started:
-        vision_runtime.start_focus_calibration()
-        runtime_orchestrator.focus_calibration_started = True
+        runtime_orchestrator.hw_calibration_accepted = True
+        runtime_orchestrator.hw_last_progress_at = time.monotonic()
+        print("[HW CAL] Calibration completed from fallback debug line.")
 
     # Run autofocus handshake against Arduino command acks.
     if runtime_orchestrator.focus_calibration_started:
@@ -2285,16 +3001,25 @@ async def handle_runtime_orchestration(vision_payload):
         vision_runtime.tick_autofocus(link)
 
     if runtime_orchestrator.focus_calibration_started and vision_runtime.to_payload().get("ready", False):
+        if not runtime_orchestrator.focus_calibrated:
+            print("[VISION] Autofocus calibration complete.")
         runtime_orchestrator.focus_calibrated = True
 
     tracking_enabled = bool(
         runtime_orchestrator.hw_calibrated
-        and runtime_orchestrator.focus_calibrated
         and astro_runtime.ready
     )
+    autofocus_busy = bool(
+        runtime_orchestrator.focus_calibration_started
+        and not runtime_orchestrator.focus_calibrated
+    )
+    focus_gate_open = bool(runtime_orchestrator.hw_calibrated and not autofocus_busy)
     astro_runtime.set_command_gates(
         hardware_ready=runtime_orchestrator.hw_calibrated,
-        focus_ready=runtime_orchestrator.focus_calibrated,
+        # Focus commands are allowed once hardware is calibrated, but we pause
+        # operator-driven focus sync while autofocus sweeps are running to avoid
+        # command contention on FOC.
+        focus_ready=focus_gate_open,
         tracking_enabled=tracking_enabled,
     )
 
@@ -2367,6 +3092,10 @@ async def start_background_tasks(app):
     CAPTURE_ROOT.mkdir(parents=True, exist_ok=True)
     EXCHANGE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     EXCHANGE_LOG_FILE.touch(exist_ok=True)
+    SERIAL_EXCHANGE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SERIAL_EXCHANGE_LOG_FILE.touch(exist_ok=True)
+    VISION_DEBUG_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    VISION_DEBUG_LOG_FILE.touch(exist_ok=True)
 
     env_sim_arduino = os.environ.get("STARTRACK_SIM_ARDUINO", "").strip().lower()
     if env_sim_arduino in {"1", "true", "yes", "on"}:
@@ -2400,12 +3129,28 @@ async def start_background_tasks(app):
                 simulate_arduino=simulate_arduino,
                 arduino_port=arduino_port,
                 arduino_baudrate=arduino_baud,
+                serial_log_file=str(SERIAL_EXCHANGE_LOG_FILE),
+                serial_log_max=SERIAL_EXCHANGE_LOG_LIMIT,
             )
         except Exception as exc:
             print(f"Astronomic runtime startup failed: {exc}")
             astro_runtime = None
     else:
         astro_runtime = None
+
+    if astro_runtime is not None:
+        try:
+            astro_runtime.set_location(
+                state.data["gps"]["lat"],
+                state.data["gps"]["lon"],
+                state.data["gps"].get("alt", 0.0),
+            )
+            astro_runtime.set_time(
+                timestamp_ms=state.data.get("timestamp"),
+                datetime_value=state.data.get("datetime"),
+            )
+        except Exception as exc:
+            print(f"Astronomic runtime initial sync failed: {exc}")
 
     focus_cfg = state.data.get("focus", {})
     if "manual_ticks" not in focus_cfg:
@@ -2480,6 +3225,9 @@ if __name__ == "__main__":
     app.router.add_get("/stream", video_feed)
     app.router.add_get("/debug/state", debug_state)
     app.router.add_get("/debug/exchanges", debug_exchanges)
+    app.router.add_get("/debug/serial", debug_serial)
+    app.router.add_post("/debug/serial/send", debug_serial_send)
+    app.router.add_get("/debug/vision", debug_vision)
     app.router.add_get("/ws", handle_websocket)
     app.router.add_static("/static", "./public/static")
     app.on_startup.append(start_background_tasks)

@@ -306,6 +306,38 @@
             color: #d9f6ef;
         }
 
+        .serial-log {
+            max-height: 220px;
+            overflow: auto;
+            display: grid;
+            gap: 6px;
+            font-size: 0.74rem;
+            margin-top: 10px;
+        }
+
+        .serial-entry {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            padding-bottom: 6px;
+            word-break: break-word;
+        }
+
+        .serial-entry .meta {
+            color: var(--muted);
+            font-size: 0.7rem;
+        }
+
+        .serial-entry.tx .meta {
+            color: #9ef6d6;
+        }
+
+        .serial-entry.ack .meta {
+            color: #a4d6ff;
+        }
+
+        .serial-entry.error .meta {
+            color: #ff9b90;
+        }
+
         .login-overlay {
             position: fixed;
             inset: 0;
@@ -556,6 +588,22 @@
                 <h2>Transit Log</h2>
                 <div class="log" id="log-output"></div>
             </section>
+
+            <section class="panel">
+                <h2>Serial Console</h2>
+                <div class="stack">
+                    <div class="row"><span class="label">Link</span><span class="value" id="serial-status-text">--</span></div>
+                </div>
+                <div class="serial-log" id="serial-log-output"></div>
+                <div class="field" style="margin-top:10px;">
+                    <label for="serial-command-input">Manual command</label>
+                    <input id="serial-command-input" type="text" placeholder="Ex: 1,FOC,0">
+                </div>
+                <div class="actions">
+                    <button class="btn" id="send-serial-btn" type="button">Send Serial</button>
+                    <button class="btn-soft" id="refresh-serial-btn" type="button">Refresh</button>
+                </div>
+            </section>
         </aside>
 
         <main class="main-view">
@@ -622,6 +670,9 @@
             streamTimer: null,
             streamRetryTimer: null,
             logLines: [],
+            serialLines: [],
+            serialPollTimer: null,
+            serialSeenKeys: new Set(),
             dirtyFields: new Set(),
             visibilityHandlerAttached: false,
             commanderSelectionDirty: false
@@ -688,6 +739,11 @@
             overlayGpsText: document.getElementById("overlay-gps-text"),
             overlayJoystickText: document.getElementById("overlay-joystick-text"),
             logOutput: document.getElementById("log-output"),
+            serialStatusText: document.getElementById("serial-status-text"),
+            serialLogOutput: document.getElementById("serial-log-output"),
+            serialCommandInput: document.getElementById("serial-command-input"),
+            sendSerialBtn: document.getElementById("send-serial-btn"),
+            refreshSerialBtn: document.getElementById("refresh-serial-btn"),
             toast: document.getElementById("toast")
         };
 
@@ -1047,18 +1103,21 @@
 
         function applyInitializationLock() {
             const ready = Boolean(state.telemetry.system?.controls_ready);
+            const hardwareReady = Boolean(state.telemetry.system?.hardware_calibrated);
             const disableDuringInit = [
                 el.photoBtn,
                 el.videoBtn,
                 el.applyCameraBtn,
-                el.applyMotorBtn,
-                el.applyFocusBtn
+                el.applyMotorBtn
             ];
             disableDuringInit.forEach((button) => {
                 if (button) {
                     button.disabled = !ready;
                 }
             });
+            if (el.applyFocusBtn) {
+                el.applyFocusBtn.disabled = !hardwareReady;
+            }
         }
 
         function renderQueueManager(queueEntries = normalizeQueueEntries(state.sysInfo.joystick_queue)) {
@@ -1166,7 +1225,16 @@
         }
 
         function controlsReadyForType(type) {
-            const allowedDuringInit = new Set(["GPS_UPDATE", "SYNC_CLOCK", "TIMESTAMP", "DATETIME", "EMERGENCY_STOP"]);
+            const allowedDuringInit = new Set([
+                "GPS_UPDATE",
+                "SYNC_CLOCK",
+                "TIMESTAMP",
+                "DATETIME",
+                "EMERGENCY_STOP",
+                "FOCUS_SETTINGS",
+                "AUTOFOCUS_RECALIBRATE",
+                "AUTOFOCUS_TEST"
+            ]);
             const ready = Boolean(state.telemetry.system?.controls_ready);
             if (ready || allowedDuringInit.has(type)) {
                 return true;
@@ -1408,6 +1476,85 @@
             }, 4000);
         }
 
+        async function fetchSerialEvents() {
+            try {
+                const response = await fetch(`/debug/serial?limit=400`, { cache: "no-store" });
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const payload = await response.json();
+                const events = Array.isArray(payload.events) ? payload.events : [];
+                const status = payload.status || {};
+                if (el.serialStatusText) {
+                    el.serialStatusText.textContent = status.available ? "CONNECTED" : "UNAVAILABLE";
+                }
+
+                events.forEach((event) => {
+                    const key = `${event.ts}|${event.direction}|${event.kind}|${event.line}`;
+                    if (state.serialSeenKeys.has(key)) {
+                        return;
+                    }
+                    state.serialSeenKeys.add(key);
+                    state.serialLines.push(event);
+                });
+                if (state.serialLines.length > 500) {
+                    state.serialLines = state.serialLines.slice(-500);
+                }
+                renderSerialEvents();
+            } catch (_error) {
+                if (el.serialStatusText) {
+                    el.serialStatusText.textContent = "ERROR";
+                }
+            }
+        }
+
+        function renderSerialEvents() {
+            if (!el.serialLogOutput) {
+                return;
+            }
+            el.serialLogOutput.innerHTML = "";
+            const rows = state.serialLines.slice(-120).reverse();
+            rows.forEach((entry) => {
+                const node = document.createElement("div");
+                const kind = String(entry.kind || "debug").toLowerCase();
+                node.className = `serial-entry ${kind}`;
+                const ts = (entry.ts || "").split("T").pop() || "--:--:--";
+                const codeText = entry.code !== null && entry.code !== undefined ? ` code=${entry.code}` : "";
+                const actionText = entry.action !== null && entry.action !== undefined ? ` action=${entry.action}` : "";
+                const motorText = entry.motor ? ` motor=${entry.motor}` : "";
+                const posText = entry.position !== null && entry.position !== undefined ? ` pos=${entry.position}` : "";
+                node.innerHTML = `
+                    <div class="meta">[${ts}] ${entry.direction || "?"}/${kind}${codeText}${actionText}${motorText}${posText}</div>
+                    <div>${entry.line || ""}</div>
+                `;
+                el.serialLogOutput.appendChild(node);
+            });
+        }
+
+        function sendSerialCommand() {
+            const command = (el.serialCommandInput.value || "").trim();
+            if (!command) {
+                showToast("Enter a serial command.");
+                return;
+            }
+            if (!sendPacket({ type: "SERIAL_RAW", command })) {
+                return;
+            }
+            addLog(`Serial command sent: ${command}`);
+            el.serialCommandInput.value = "";
+            setTimeout(() => {
+                fetchSerialEvents();
+            }, 250);
+        }
+
+        function startSerialPolling() {
+            if (state.serialPollTimer) {
+                clearInterval(state.serialPollTimer);
+            }
+            fetchSerialEvents();
+            state.serialPollTimer = setInterval(fetchSerialEvents, 1000);
+        }
+
         function addLog(message) {
             const line = `[${new Date().toLocaleTimeString()}] ${message}`;
             state.logLines.unshift(line);
@@ -1489,6 +1636,13 @@
             el.applyCameraBtn.addEventListener("click", sendCameraSettings);
             el.applyMotorBtn.addEventListener("click", sendMotorSettings);
             el.applyFocusBtn.addEventListener("click", sendFocusSettings);
+            el.sendSerialBtn.addEventListener("click", sendSerialCommand);
+            el.refreshSerialBtn.addEventListener("click", fetchSerialEvents);
+            el.serialCommandInput.addEventListener("keydown", (event) => {
+                if (event.key === "Enter") {
+                    sendSerialCommand();
+                }
+            });
             el.focusModeSelect.addEventListener("change", updateFocusUi);
 
             el.cameraExposureRange.addEventListener("input", () => {
@@ -1521,6 +1675,7 @@
         updateFocusUi();
         startClockTicker();
         startVideoStream();
+        startSerialPolling();
         connectWs();
     </script>
 </body>

@@ -20,7 +20,7 @@
             --warn: #ffd36b;
             --top-offset: clamp(38px, 6vh, 58px);
             --rail-height: clamp(60px, 10vh, 84px);
-            --video-inset: 14px;
+            --video-inset: 8px;
             --radius: 18px;
             --shadow: 0 18px 54px rgba(0, 0, 0, 0.36);
         }
@@ -252,6 +252,8 @@
         #video-feed {
             position: absolute;
             inset: var(--video-inset);
+            width: calc(100% - (2 * var(--video-inset)));
+            height: calc(100% - (2 * var(--video-inset)));
             object-fit: contain;
             object-position: center center; /* Added */
             display: block;
@@ -1368,6 +1370,7 @@
                     <div class="btn-row">
                         <button class="ghost-btn" type="button" id="apply-focus-btn">Apply Focus</button>
                         <button class="ghost-btn" type="button" id="autofocus-btn">Recalibrate Auto Focus</button>
+                        <button class="ghost-btn" type="button" id="autofocus-test-btn">Auto Focus Test (No RA/DEC)</button>
                     </div>
                 </div>
                 <div class="card">
@@ -1740,15 +1743,19 @@
 
         function updateFocusUi() {
             const manualMode = el.focusModeSelect.value === "manual";
-            const controlsReady = Boolean(state.telemetry.system?.controls_ready);
+            const hardwareReady = Boolean(state.telemetry.system?.hardware_calibrated);
             el.focusManualGroup.classList.toggle("hidden", !manualMode);
-            el.focusModeSelect.disabled = !controlsReady;
-            el.focusRange.disabled = !manualMode || !controlsReady;
-            el.focusInput.disabled = !manualMode || !controlsReady;
-            document.getElementById("apply-focus-btn").disabled = !controlsReady;
+            el.focusModeSelect.disabled = !hardwareReady;
+            el.focusRange.disabled = !manualMode || !hardwareReady;
+            el.focusInput.disabled = !manualMode || !hardwareReady;
+            document.getElementById("apply-focus-btn").disabled = !hardwareReady;
             const autofocusBtn = document.getElementById("autofocus-btn");
             if (autofocusBtn) {
-                autofocusBtn.disabled = !controlsReady;
+                autofocusBtn.disabled = false;
+            }
+            const autofocusTestBtn = document.getElementById("autofocus-test-btn");
+            if (autofocusTestBtn) {
+                autofocusTestBtn.disabled = false;
             }
         }
 
@@ -2316,12 +2323,22 @@
                 renderSearchResults();
                 return;
             }
-            const targets = state.catalog?.[state.selectedTab] || [];
+            const targets = (state.catalog?.[state.selectedTab] || []).filter((target) => {
+                const altitude = Number(target?.altitude_deg);
+                return Number.isFinite(altitude) && altitude >= 0;
+            });
             el.targetGrid.innerHTML = "";
             if (!targets.length && state.selectedTab === "tab-misc") {
                 const empty = document.createElement("div");
                 empty.className = "card";
                 empty.textContent = "Miscellaneous targets will appear here.";
+                el.targetGrid.appendChild(empty);
+                return;
+            }
+            if (!targets.length) {
+                const empty = document.createElement("div");
+                empty.className = "card";
+                empty.textContent = "No visible targets in this tab right now.";
                 el.targetGrid.appendChild(empty);
                 return;
             }
@@ -2342,7 +2359,10 @@
 
         function renderSearchResults() {
             const query = (state.searchQuery || "").trim().toLowerCase();
-            const allTargets = Object.values(state.catalog || {}).flat();
+            const allTargets = Object.values(state.catalog || {}).flat().filter((target) => {
+                const altitude = Number(target?.altitude_deg);
+                return Number.isFinite(altitude) && altitude >= 0;
+            });
             const filtered = query
                 ? allTargets.filter((target) => {
                     const name = (target.name || target.id || "").toLowerCase();
@@ -2387,7 +2407,19 @@
         }
 
         function visibilityClassForTarget(target) {
-            const level = (target?.visibility_level || "").toLowerCase();
+            let level = (target?.visibility_level || "").toLowerCase();
+            if (!level) {
+                const altitude = Number(target?.altitude_deg);
+                if (Number.isFinite(altitude)) {
+                    if (altitude >= 45) {
+                        level = "high";
+                    } else if (altitude >= 25) {
+                        level = "medium";
+                    } else if (altitude >= 0) {
+                        level = "low";
+                    }
+                }
+            }
             if (level === "high") {
                 return "alt-high";
             }
@@ -2573,7 +2605,17 @@
         }
 
         function controlsReadyForType(type) {
-            const allowedDuringInit = new Set(["GPS_UPDATE", "SYNC_CLOCK", "TIMESTAMP", "DATETIME", "EMERGENCY_STOP"]);
+            const allowedDuringInit = new Set([
+                "GPS_UPDATE",
+                "SYNC_CLOCK",
+                "TIMESTAMP",
+                "DATETIME",
+                "MISSION",
+                "EMERGENCY_STOP",
+                "FOCUS_SETTINGS",
+                "AUTOFOCUS_RECALIBRATE",
+                "AUTOFOCUS_TEST"
+            ]);
             const ready = Boolean(state.telemetry.system?.controls_ready);
             if (ready || allowedDuringInit.has(type)) {
                 return true;
@@ -2948,6 +2990,14 @@
             );
         }
 
+        function triggerAutofocusTest() {
+            sendOrRequest(
+                { type: "AUTOFOCUS_TEST", focus_only: true },
+                "Start autofocus test without RA/DEC calibration",
+                { successMessage: "Autofocus test requested (focus-only mode)." }
+            );
+        }
+
         function openSheet(id) {
             closeAllSheets(id);
             document.getElementById(id).classList.add("open");
@@ -3188,6 +3238,7 @@
                 el.focusRange.value = clampNumber(parseInt(el.focusInput.value, 10), 0, maxTicks);
             });
             document.getElementById("autofocus-btn").addEventListener("click", triggerAutofocusCalibration);
+            document.getElementById("autofocus-test-btn").addEventListener("click", triggerAutofocusTest);
 
             document.getElementById("send-joystick-request-btn").addEventListener("click", requestJoystickPrivilege);
             document.getElementById("release-joystick-btn").addEventListener("click", () => closeJoystickDock(true));

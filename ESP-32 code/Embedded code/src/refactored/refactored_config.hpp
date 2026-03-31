@@ -37,10 +37,10 @@ static const uint8_t DEC_REN = 22;
 static const uint8_t DEC_LEN = 23;
 
 // RA encoder + BTS7960 pins
-static const uint8_t RA_ENC_A = 18;
-static const uint8_t RA_ENC_B = 19;
-static const uint8_t RA_RPWM = 8;
-static const uint8_t RA_LPWM = 9;
+static const uint8_t RA_ENC_A = 19;
+static const uint8_t RA_ENC_B = 18;
+static const uint8_t RA_RPWM = 9;
+static const uint8_t RA_LPWM = 8;
 static const uint8_t RA_REN = 24;
 static const uint8_t RA_LEN = 25;
 

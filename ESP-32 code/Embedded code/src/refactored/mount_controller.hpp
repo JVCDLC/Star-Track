@@ -184,6 +184,8 @@ class MountController {
   unsigned long m_debugStartMs;              ///< When debug started
   unsigned long m_lastDebugPrintMs;          ///< Last time debug info was printed
   bool m_emitDoneWhenReady;                  ///< Emit serial code "2" once next time mount reaches READY
+  bool m_emitFocusDoneWhenReady;             ///< Emit "2,FOC,<pos>" when focus command reaches READY
+  bool m_lastCommandWasFocus;                ///< Last accepted host command targets focus axis
 
   /**
    * @brief Motion self-test state machine.
