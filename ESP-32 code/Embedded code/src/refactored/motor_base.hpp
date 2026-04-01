@@ -122,6 +122,7 @@ class MotorBase {
   void update(unsigned long nowMs);
 
   void requestCalibration();
+  bool canAcceptCommand(long targetTicks) const;
   bool commandPositionTicks(long targetTicks);
   virtual bool commandSpeedTicksPerSecond(long targetTicks, float ticksPerSecond);
   void emergencyStopAndHold();

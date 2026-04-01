@@ -161,8 +161,33 @@ class MountController {
    */
   bool startMotionSelfTest(MotorSelector selector, long requestedDeltaTicks);
 
+  /**
+   * @brief Process queued RA/DEC commands when the 40ms stagger delay has elapsed.
+   * @param nowMs Current timestamp
+   * 
+   * This method implements the delay buffer logic to prevent RA and DEC motors
+   * from starting at the same time, which would cause excessive current draw.
+   * Focus motor starts immediately and does not use this buffer.
+   */
+  void updateDelayedStarts(unsigned long nowMs);
+
   // Member variables - grouped by purpose
   SerialProtocol m_serial;         ///< Serial command parser
+  
+  // Delay buffer for staggering RA/DEC motor starts
+  /**
+   * @brief Structure representing a pending motor command in the delay buffer.
+   */
+  struct PendingMove {
+    bool active;          ///< Whether a pending command is queued
+    long targetTicks;     ///< Target position for the pending command
+  };
+
+  static const unsigned long kMotorStartDelayMs = 40;  ///< Minimum delay between motor starts (ms)
+
+  PendingMove m_pendingRa;         ///< Pending RA move (queued if started too soon)
+  PendingMove m_pendingDec;        ///< Pending DEC move (queued if started too soon)
+  unsigned long m_lastMotorStartMs; ///< Timestamp of when last motor (RA/DEC) started
   
   // Three motor instances (hardcoded configuration)
   BTS7960Motor m_motorDec;         ///< Declination motor (elevation)
@@ -178,7 +203,14 @@ class MountController {
   MotorState m_lastPrintedRaState;           ///< Previous RA state (detect changes)
   MotorState m_lastPrintedDecState;          ///< Previous DEC state (detect changes)
   MotorState m_lastPrintedFocState;          ///< Previous FOC state (detect changes)
-
+  
+  uint16_t m_lastPrintedSwitchBitmap;
+  long m_lastPrintedRaPos;
+  long m_lastPrintedRaTgt;
+  long m_lastPrintedDecPos;
+  long m_lastPrintedDecTgt;
+  long m_lastPrintedFocPos;
+  long m_lastPrintedFocTgt;
   // Focus debug state
   bool m_debugFocusActive;                   ///< Focus debug mode active
   unsigned long m_debugStartMs;              ///< When debug started

@@ -70,6 +70,12 @@ MotorRuntimeConfig buildRuntimeCommon() { // Common runtime config for RA/DEC
   return cfg;
 }
 
+MotorRuntimeConfig buildRuntimeDEC() { // Common runtime config for RA/DEC
+  MotorRuntimeConfig cfg = buildRuntimeCommon();
+  cfg.pwmMax = 110;
+  return cfg;
+}
+
 MotorRuntimeConfig buildRuntimeFocus() { // Focus runtime with extra settle tolerance near target
   MotorRuntimeConfig cfg = buildRuntimeCommon();
   // Hard safety cap for focus mechanics: never command above 100 PWM.
@@ -89,7 +95,7 @@ CalibrationConfig buildCalibrationRa() {
   cfg.backoffPwm = 100;
   cfg.backoffDurationMs = 1000;
   cfg.releaseStableMs = 40;
-  cfg.verifyDeltaToleranceTicks = 8;
+  cfg.verifyDeltaToleranceTicks = 150;
   cfg.singleSwitchHomeOnly = false;
   cfg.centerToleranceTicks = 2;
   cfg.centerSettleMs = 80;
@@ -104,7 +110,9 @@ CalibrationConfig buildCalibrationRa() {
 CalibrationConfig buildCalibrationDec() {
   CalibrationConfig cfg = buildCalibrationRa();
   // DEC is mechanically easier to drive and safer with a lower full-speed calibration seek.
-  cfg.fastSeekPwm = 210;
+  cfg.fastSeekPwm = 110;
+  cfg.verifySeekPwm = -10;
+  cfg.backoffPwm = -10;
   return cfg;
 }
 
@@ -114,7 +122,7 @@ CalibrationConfig buildCalibrationFocus() {
   // After homing to SW1, the controller waits in READY for the pi to send the calibration command for autofocus.
   cfg.fastSeekPwm = 75;
   cfg.verifySeekPwm = 30;
-  cfg.backoffPwm = 25;
+  cfg.backoffPwm = 40;
   cfg.backoffDurationMs = 1000;
   cfg.releaseStableMs = 40;
   cfg.verifyDeltaToleranceTicks = 6;
@@ -204,14 +212,14 @@ MountController::MountController() // Constructor initializes motors and state
                  MotorId::AXIS_DEC,   // Reads from DEC encoder
                  Bts7960Pins{pins::DEC_RPWM, pins::DEC_LPWM, pins::DEC_REN, pins::DEC_LEN},   // 
                  buildDecPid(),
-                 buildRuntimeCommon(),
+                 buildRuntimeDEC(),
                  LimitConfig{
                      // DEC hardware mapping:
                      // - SW1: one end-stop
                      // - SW4: opposite end-stop
                      //
                      // +1 blocks travel toward the SW4 side, -1 blocks toward the SW1 side.
-                     true,  SwitchId::SW5, -1, // JAUNE
+                     true,  SwitchId::SW7, -1, // JAUNE
                      true,  SwitchId::SW4, +1,  // VERT
                      43000}, // Fallback span if no switches: 43000 ticks
                  buildCalibrationDec(),
@@ -247,6 +255,10 @@ MountController::MountController() // Constructor initializes motors and state
       m_lastPrintedRaState(MotorState::UNINITIALIZED),
       m_lastPrintedDecState(MotorState::UNINITIALIZED),
       m_lastPrintedFocState(MotorState::UNINITIALIZED),
+      m_lastPrintedSwitchBitmap(0),
+      m_lastPrintedRaPos(0), m_lastPrintedRaTgt(0),
+      m_lastPrintedDecPos(0), m_lastPrintedDecTgt(0),
+      m_lastPrintedFocPos(0), m_lastPrintedFocTgt(0),
       m_debugFocusActive(false),
       m_debugStartMs(0),
       m_lastDebugPrintMs(0),
@@ -254,7 +266,10 @@ MountController::MountController() // Constructor initializes motors and state
       m_emitFocusDoneWhenReady(false),
       m_lastCommandWasFocus(false),
       m_selfTest{false, NULL, 0, 0, 0, 0},
-      m_calibrationLaunch{false, 0, 0} {}
+      m_calibrationLaunch{false, 0, 0},
+      m_pendingRa{false, 0},
+      m_pendingDec{false, 0},
+      m_lastMotorStartMs(0) {}
 
 void MountController::begin() { // Initializes hardware and starts calibration
   // Silent PWM setup
@@ -302,6 +317,8 @@ void MountController::startParallelCalibration() {
   // 2) DEC after delay
   // 3) FOC after delay
   cancelCalibrationLaunch();
+  m_pendingRa.active = false;
+  m_pendingDec.active = false;
   m_motorRa.requestCalibration();
   m_calibrationLaunch.active = true;
   m_calibrationLaunch.stage = 1;
@@ -318,6 +335,8 @@ void MountController::startParallelCalibration() {
 
 bool MountController::startSingleMotorCalibration(MotorSelector selector) {
   cancelCalibrationLaunch();
+  m_pendingRa.active = false;
+  m_pendingDec.active = false;
   MotorBase* motor = selectMotor(selector);
   if (motor == NULL) {
     return false;
@@ -331,6 +350,9 @@ bool MountController::startMotionSelfTest(MotorSelector selector, long requested
   // Hardware motion self-test:
   // command a short move and verify encoder delta rises above threshold.
   // This separates software/control issues from wiring/driver issues quickly.
+  m_pendingRa.active = false;
+  m_pendingDec.active = false;
+  
   MotorBase* motor = selectMotor(selector);
   if (motor == NULL || motor->isError()) {
     return false;
@@ -373,11 +395,44 @@ bool MountController::startMotionSelfTest(MotorSelector selector, long requested
 
 void MountController::emergencyStopAll() {
   cancelCalibrationLaunch();
+  m_pendingRa.active = false;
+  m_pendingDec.active = false;
   m_motorDec.emergencyStopAndHold();
   m_motorRa.emergencyStopAndHold();
   m_motorFoc.emergencyStopAndHold();
 }
 
+void MountController::updateDelayedStarts(unsigned long nowMs) {
+  // Check if enough time has passed since the last motor start
+  if (nowMs - m_lastMotorStartMs < kMotorStartDelayMs) {
+    return;  // Still within the stagger delay, don't start anything
+  }
+
+  // Process pending RA command first
+  if (m_pendingRa.active) {
+    if (m_motorRa.canAcceptCommand(m_pendingRa.targetTicks)) {
+      m_pendingRa.active = false;
+      m_motorRa.commandPositionTicks(m_pendingRa.targetTicks);
+      m_lastMotorStartMs = nowMs;
+      return;  // Early exit to allow DEC to start on next cycle
+    } /*else {
+      // Validation failed, discard the command
+      m_pendingRa.active = false;
+    }*/
+  }
+
+  // Process pending DEC command if RA didn't start
+  if (m_pendingDec.active) {
+    if (m_motorDec.canAcceptCommand(m_pendingDec.targetTicks)) {
+      m_pendingDec.active = false;
+      m_motorDec.commandPositionTicks(m_pendingDec.targetTicks);
+      m_lastMotorStartMs = nowMs;
+    } /*else {
+      // Validation failed, discard the command
+      m_pendingDec.active = false;
+    }*/
+  }
+}
 void MountController::cancelCalibrationLaunch() {
   m_calibrationLaunch.active = false;
   m_calibrationLaunch.stage = 0;
@@ -442,26 +497,50 @@ bool MountController::processCommand(const SerialCommand& cmd) {
     case CommandAction::MOVE_ABSOLUTE: {
       MotorBase* motor = selectMotor(cmd.motor);
       if (motor == NULL) return false;
-      const bool ok = motor->commandPositionTicks(cmd.targetTicks);
-      if (!ok && kDebugLogsEnabled) {
-        Serial.print(F("DBG,REJECT,MOVE_ABSOLUTE,motor="));
-        Serial.print(motor->readName());
-        Serial.print(F(",state="));
-        Serial.print(motorStateText(motor->readState()));
-        Serial.print(F(",target="));
-        Serial.println(cmd.targetTicks);
-      }
-      if (ok) {
-        if (cmd.motor == MotorSelector::MOTOR_FOC) {
-          // Focus completion is acknowledged independently from global mount READY.
+
+      // Focus motor starts immediately
+      if (cmd.motor == MotorSelector::MOTOR_FOC) {
+        const bool ok = motor->commandPositionTicks(cmd.targetTicks);
+        if (!ok && kDebugLogsEnabled) {
+          Serial.print(F("DBG,REJECT,MOVE_ABSOLUTE,motor="));
+          Serial.print(motor->readName());
+          Serial.print(F(",state="));
+          Serial.print(motorStateText(motor->readState()));
+          Serial.print(F(",target="));
+          Serial.println(cmd.targetTicks);
+        }
+        if (ok) {
           m_emitFocusDoneWhenReady = true;
           m_lastCommandWasFocus = true;
-        } else {
-          m_emitDoneWhenReady = true;
-          m_lastCommandWasFocus = false;
         }
+        return ok;
       }
-      return ok;
+
+      // RA and DEC motors go to pending buffer for staggered starts
+      if (!motor->canAcceptCommand(cmd.targetTicks)) {
+        if (kDebugLogsEnabled) {
+          Serial.print(F("DBG,REJECT,MOVE_ABSOLUTE,motor="));
+          Serial.print(motor->readName());
+          Serial.print(F(",state="));
+          Serial.print(motorStateText(motor->readState()));
+          Serial.print(F(",target="));
+          Serial.println(cmd.targetTicks);
+        }
+        return false;
+      }
+
+      // Queue the command
+      if (cmd.motor == MotorSelector::MOTOR_RA) {
+        m_pendingRa.active = true;
+        m_pendingRa.targetTicks = cmd.targetTicks;
+      } else if (cmd.motor == MotorSelector::MOTOR_DEC) {
+        m_pendingDec.active = true;
+        m_pendingDec.targetTicks = cmd.targetTicks;
+      }
+
+      m_emitDoneWhenReady = true;
+      m_lastCommandWasFocus = false;
+      return true;
     }
 
     case CommandAction::MOVE_WITH_SPEED:
@@ -580,24 +659,57 @@ void MountController::updateMotionSelfTest(unsigned long nowMs) {
 void MountController::emitDebug(unsigned long nowMs) {
   if (!kDebugLogsEnabled) return;
   if (Serial.available() > 0) return;  // Avoid interleaving while user types commands.
+
+  // 1. Fetch all current states and positions
   const MountState mountNow = m_state;
   const MotorState raNow = m_motorRa.readState();
   const MotorState decNow = m_motorDec.readState();
   const MotorState focNow = m_motorFoc.readState();
+  
+  const uint16_t swNow = InterruptHub::readSwitchBitmap();
+  const long raPos = m_motorRa.readTicks();
+  const long raTgt = m_motorRa.readTargetTicks();
+  const long decPos = m_motorDec.readTicks();
+  const long decTgt = m_motorDec.readTargetTicks();
+  const long focPos = m_motorFoc.readTicks();
+  const long focTgt = m_motorFoc.readTargetTicks();
 
-  const bool stateChanged =
+  // 2. Separate high-priority changes (states/switches) from high-frequency changes (positions)
+  const bool stateOrSwitchChanged =
       (mountNow != m_lastPrintedMountState) ||
       (raNow != m_lastPrintedRaState) ||
       (decNow != m_lastPrintedDecState) ||
-      (focNow != m_lastPrintedFocState);
-  const bool periodicHeartbeat = ((nowMs - m_lastDebugMs) >= kDebugPeriodMs);
-  if (!stateChanged && !periodicHeartbeat) return;
+      (focNow != m_lastPrintedFocState) ||
+      (swNow != m_lastPrintedSwitchBitmap);
 
+  const bool posOrTgtChanged =
+      (raPos != m_lastPrintedRaPos) || (raTgt != m_lastPrintedRaTgt) ||
+      (decPos != m_lastPrintedDecPos) || (decTgt != m_lastPrintedDecTgt) ||
+      (focPos != m_lastPrintedFocPos) || (focTgt != m_lastPrintedFocTgt);
+
+  // 3. If absolutely nothing changed, stay silent. (Removes the 6-second heartbeat)
+  if (!stateOrSwitchChanged && !posOrTgtChanged) return;
+
+  // 4. If ONLY positions changed, throttle the output to avoid 200Hz spam while moving.
+  if (!stateOrSwitchChanged && posOrTgtChanged && (nowMs - m_lastDebugMs < 5000)) {
+    return;
+  }
+
+  // 5. Update cache for the next loop
   m_lastDebugMs = nowMs;
   m_lastPrintedMountState = mountNow;
   m_lastPrintedRaState = raNow;
   m_lastPrintedDecState = decNow;
   m_lastPrintedFocState = focNow;
+  m_lastPrintedSwitchBitmap = swNow;
+  m_lastPrintedRaPos = raPos;
+  m_lastPrintedRaTgt = raTgt;
+  m_lastPrintedDecPos = decPos;
+  m_lastPrintedDecTgt = decTgt;
+  m_lastPrintedFocPos = focPos;
+  m_lastPrintedFocTgt = focTgt;
+
+  // ... keep your existing Serial.print(F("DBG,mount=")); lines below this ...
 
   Serial.print(F("DBG,mount="));
   Serial.print(mountStateText(m_state));
@@ -663,6 +775,12 @@ void MountController::updateMountState() {
     return;
   }
 
+  // Check for queued moves in the delay buffer
+  if (m_pendingRa.active || m_pendingDec.active) {
+    m_state = MountState::TRACKING;
+    return;
+  }
+
   if (isMotorMovingState(m_motorDec.readState()) ||
       isMotorMovingState(m_motorRa.readState()) ||
       isMotorMovingState(m_motorFoc.readState())) {
@@ -703,6 +821,7 @@ void MountController::update() {
 
   const unsigned long nowMs = millis();
   updateCalibrationLaunch(nowMs);
+  updateDelayedStarts(nowMs);
   m_motorDec.update(nowMs);
   m_motorRa.update(nowMs);
   m_motorFoc.update(nowMs);

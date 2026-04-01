@@ -118,6 +118,24 @@ void MotorBase::requestCalibration() {
 }
 
 /**
+ * @brief Check if the motor can accept a position command.
+ * @param targetTicks The target position in encoder ticks
+ * @return true if validation passes, false if motor is in error or target is out of limits
+ * 
+ * This method extracts validation logic from commandPositionTicks to allow
+ * pre-validation before queuing commands in the delay buffer.
+ */
+bool MotorBase::canAcceptCommand(long targetTicks) const {
+  if (isError()) {
+    return false;  // Reject if motor is in error state
+  }
+  if (!targetInsideKnownLimits(targetTicks)) {
+    return false;  // Reject if target is outside calibrated limits
+  }
+  return true;
+}
+
+/**
  * @brief Command the motor to move to an absolute position.
  * @param targetTicks The target position in encoder ticks
  * @return true if command accepted, false if rejected (error state or out of limits)
@@ -126,11 +144,8 @@ void MotorBase::requestCalibration() {
  * and transitions to appropriate state (READY if already at target, MOVING otherwise).
  */
 bool MotorBase::commandPositionTicks(long targetTicks) {
-  if (isError()) {
-    return false;  // Reject commands if motor is in error state
-  }
-  if (!targetInsideKnownLimits(targetTicks)) {
-    return false;  // Reject if target is outside calibrated limits
+  if (!canAcceptCommand(targetTicks)) {
+    return false;
   }
 
   // Allow command-driven interruption of calibration to support per-axis testing.

@@ -3,6 +3,7 @@ import json
 import math
 import re
 import time
+from numpy import sign
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -827,6 +828,7 @@ class AstronomicOperator:
 
     def _target_hadec(self, target_id, timestamp_ms):
         obj = self._resolve_target(target_id)
+        polaris = self._resolve_target(11767)
         if obj is None or self.observer is None or self.time_scale is None:
             return None
         t_now = self._time_from_ms(timestamp_ms)
@@ -834,8 +836,15 @@ class AstronomicOperator:
             return None
         try:
             ha, dec, _ = self.observer.at(t_now).observe(obj).apparent().hadec()
-            return float(ha.degrees), float(dec.degrees)
-        except Exception:
+            _,polarisDec,_ = self.observer.at(t_now).observe(polaris).apparent().hadec()
+            ha_deg = ha.degrees
+            dec_deg = dec.degrees
+            polaris_dec_deg = polarisDec.degrees
+
+            ha_calc = - (ha_deg - 90 * sign(ha_deg))
+            dec_calc = -sign(ha_deg) * (dec_deg - polaris_dec_deg)
+            return float(ha_calc), float(dec_calc)
+        except Exception as e:
             return None
 
     def _capture_reference_frame_locked(self, timestamp_ms=None):
@@ -850,14 +859,6 @@ class AstronomicOperator:
         self.reference_frame_ready = True
         self.reference_captured_ms = ts_ms
         return True
-
-    def _apply_reference_offset_locked(self, mount_ha_deg, mount_dec_deg):
-        if not self.reference_frame_ready:
-            return float(mount_ha_deg), float(mount_dec_deg)
-        return (
-            float(mount_ha_deg) - float(self.reference_mount_ha_deg),
-            float(mount_dec_deg) - float(self.reference_mount_dec_deg),
-        )
 
     @staticmethod
     def _limit_target_error_against_position(target_step, current_step, max_abs_error):
@@ -1191,13 +1192,9 @@ class AstronomicOperator:
                             self._locked_target_id = str(target_id)
                             self._locked_target_hadec = (float(locked[0]), float(locked[1]))
                     hadec = self._locked_target_hadec
-                print(f"hadec: {hadec}", flush=True)
                 if hadec is not None:
                     mount_ha_deg, mount_dec_deg = self.new_ha_dec(*hadec)
-                    base_ha_deg, base_dec_deg = mount_ha_deg, mount_dec_deg#self._apply_reference_offset_locked(
-                     #   mount_ha_deg, mount_dec_deg
-                    #)
-                    print(f"base_ha_deg: {base_ha_deg}, base_dec_deg {base_dec_deg}", flush = True)
+                    base_ha_deg, base_dec_deg = mount_ha_deg, mount_dec_deg
                     if manual_input_active:
                         self.joystick_ra_offset_deg = _clamp(
                             self.joystick_ra_offset_deg + (jx * self.manual_speed_max_ra_deg_s * dt),
@@ -1211,7 +1208,6 @@ class AstronomicOperator:
                         )
                     desired_ha_deg = float(base_ha_deg) + float(self.joystick_ra_offset_deg)
                     desired_dec_deg = float(base_dec_deg) + float(self.joystick_dec_offset_deg)
-                    print(f"desired_ha_deg: {desired_ha_deg}, desired_dec_deg: {desired_dec_deg}", flush = True)
                     if camera_tracking_enabled:
                         ra_off, dec_off = self._tracking_offsets_deg_locked()
                         desired_ha_deg += ra_off
@@ -1233,14 +1229,11 @@ class AstronomicOperator:
 
             desired_ha_deg = _clamp(desired_ha_deg, -90.0, 90.0)
             desired_dec_deg = _clamp(desired_dec_deg, -180.0, 180.0)
-            print(f"desired_ha_deg2: {desired_ha_deg}, desired_dec_deg2: {desired_dec_deg}", flush = True)
-
             self.last_target_id = target_id
             self.last_ha_deg = float(desired_ha_deg)
             self.last_dec_deg = float(desired_dec_deg)
             self.last_ra_step = int(round(float(desired_ha_deg) * self.ra_steps_per_degree))
             self.last_dec_step = int(round(float(desired_dec_deg) * self.dec_steps_per_degree))
-            print(f"self.last_ra_step: {self.last_ra_step}, last_dec_step{self.last_dec_step}", flush = True)
             # Mount movement does not depend on focus-ready; only hardware calibration gate.
             if not self.hardware_ready:
                 return
@@ -1294,10 +1287,7 @@ class AstronomicOperator:
             )
             send_interval = 0.4 if slew_throttled else 0.02
             if (step_changed or heartbeat_due) and (now - self.last_track_send_s) >= send_interval:
-                print(f"Latitude: {self.latitude}, Longitude: {self.longitude}", flush=True)
-                print(f"cmd_ra_step:{cmd_ra_step}, cmd_dec_step: {cmd_dec_step}", flush = True)
                 sent_ra = self.motor_link.send_command(1, "RA", cmd_ra_step)
-                time.sleep(0.04)
                 sent_dec = self.motor_link.send_command(1, "DEC", cmd_dec_step)
                 if sent_ra:
                     self.last_sent_ra_step = int(cmd_ra_step)
