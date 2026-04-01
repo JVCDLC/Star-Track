@@ -542,7 +542,7 @@ class AstronomicOperator:
         self.focus_last_command_step = None
         self.focus_last_command_mode = ""
 
-        self.camera_angle_deg = 0.0
+        self.camera_angle_deg = 45.0
         self.tracking_dx = 0.0
         self.tracking_dy = 0.0
         self.tracking_frame_width = 1
@@ -825,6 +825,29 @@ class AstronomicOperator:
         if abs(ha) >= 90.0:
             new_dec = (180.0 - dec % 360.0) % 360.0
         return new_ha, new_dec
+    
+    
+    def rotate_x_y_by_angle_deg(self, x, y, angle_deg):
+        a = math.radians(float(angle_deg))
+        new_x = (x * math.cos(a)) - (y * math.sin(a))
+        new_y = (x * math.sin(a)) + (y * math.cos(a))
+        return float(new_x), float(new_y)
+    
+    def x_y_to_ha_dec(self, x_deg, y_deg, camera_angle_deg, dec_position_deg):
+        delta_x, delta_y = self.rotate_x_y_by_angle_deg(x_deg, y_deg, camera_angle_deg)
+        # For small DEC angles, the HA correction becomes unstable (division by sin(dec) ~ 0), so we can approximate:
+        if abs(dec_position_deg) > 5:
+            ha_offset = delta_y / math.sin(math.radians(dec_position_deg))
+            dec_offset = (
+                delta_y * math.cos(math.radians(dec_position_deg))
+                / math.sin(math.radians(dec_position_deg))
+                - delta_x
+            )
+        else:
+            ha_offset = 0.0
+            dec_offset = float(delta_x)
+
+        return float(ha_offset), float(dec_offset)
 
     def _target_hadec(self, target_id, timestamp_ms):
         obj = self._resolve_target(target_id)
@@ -889,8 +912,7 @@ class AstronomicOperator:
 
         # Rotate camera-frame correction into mount HA/DEC frame.
         a = math.radians(float(self.camera_angle_deg))
-        ha_offset = (x_deg * math.cos(a)) - (y_deg * math.sin(a))
-        dec_offset = (x_deg * math.sin(a)) + (y_deg * math.cos(a))
+        ha_offset, dec_offset  = self.x_y_to_ha_dec(x_deg, y_deg, self.camera_angle_deg, self.last_dec_deg)
         self.tracking_ra_offset_deg = float(ha_offset)
         self.tracking_dec_offset_deg = float(dec_offset)
         return float(ha_offset), float(dec_offset)
@@ -1196,13 +1218,20 @@ class AstronomicOperator:
                     mount_ha_deg, mount_dec_deg = self.new_ha_dec(*hadec)
                     base_ha_deg, base_dec_deg = mount_ha_deg, mount_dec_deg
                     if manual_input_active:
+                        joystick_ra_add, joystick_dec_add = self.x_y_to_ha_dec(
+                            x_deg=jx * self.manual_speed_max_ra_deg_s * dt,
+                            y_deg=jy * self.manual_speed_max_dec_deg_s * dt,
+                            camera_angle_deg=self.camera_angle_deg,
+                            dec_position_deg=base_dec_deg,
+                        )
+
                         self.joystick_ra_offset_deg = _clamp(
-                            self.joystick_ra_offset_deg + (jx * self.manual_speed_max_ra_deg_s * dt),
+                            self.joystick_ra_offset_deg + joystick_ra_add,
                             -self.manual_trim_limit_deg,
                             self.manual_trim_limit_deg,
                         )
                         self.joystick_dec_offset_deg = _clamp(
-                            self.joystick_dec_offset_deg + ((-jy) * self.manual_speed_max_dec_deg_s * dt),
+                            self.joystick_dec_offset_deg + joystick_dec_add,
                             -self.manual_trim_limit_deg,
                             self.manual_trim_limit_deg,
                         )
@@ -1221,9 +1250,15 @@ class AstronomicOperator:
                 self.tracking_dec_offset_deg = 0.0
                 self.joystick_ra_offset_deg = 0.0
                 self.joystick_dec_offset_deg = 0.0
+                joystick_ra_add, joystick_dec_add = self.x_y_to_ha_dec(
+                            x_deg=jx * self.manual_speed_max_ra_deg_s * dt,
+                            y_deg=jy * self.manual_speed_max_dec_deg_s * dt,
+                            camera_angle_deg=self.camera_angle_deg,
+                            dec_position_deg=base_dec_deg,
+                        )
                 if manual_input_active:
-                    desired_ha_deg += jx * self.manual_speed_max_ra_deg_s * dt
-                    desired_dec_deg += (-jy) * self.manual_speed_max_dec_deg_s * dt
+                    desired_ha_deg += joystick_ra_add
+                    desired_dec_deg += joystick_dec_add
                 if compensate_earth_rotation:
                     desired_ha_deg += self.sidereal_ra_deg_s * dt
 
