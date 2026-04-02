@@ -557,10 +557,10 @@ class AstronomicOperator:
         self.manual_trim_limit_deg = 45.0
         self.joystick_ra_offset_deg = 0.0
         self.joystick_dec_offset_deg = 0.0
-        self.sidereal_ra_deg_s = 360.0 / 86164.0905
+        self.sidereal_ra_deg_s = - 360.0 / 86164.0905
         self.manual_speed_max_ra_deg_s = 1000.0 * self.sidereal_ra_deg_s
-        self.manual_speed_max_dec_deg_s = self.manual_speed_max_ra_deg_s / 24.0
-        self.deadzone_around_polaris_deg = 5.0
+        self.manual_speed_max_dec_deg_s = self.manual_speed_max_ra_deg_s / 23.0
+        self.deadzone_around_polaris_deg = 5.0 # up and down from Polaris, HA corrections become unstable, so we can skip them in that area.
 
         self.last_ra_step = 0
         self.last_dec_step = 0
@@ -1225,19 +1225,19 @@ class AstronomicOperator:
                     dec_ref_for_manual = float(mount_dec_deg)
                     if manual_input_active:
                         joystick_ra_add, joystick_dec_add = self.x_y_to_ha_dec(
-                            x_deg=jx * self.manual_speed_max_dec_deg_s * dt,
-                            y_deg=jy * self.manual_speed_max_ra_deg_s * dt,
-                            camera_angle_deg=self.camera_angle_deg,
-                            dec_position_deg=mount_dec_deg,
+                            x_deg = jx,
+                            y_deg = jy,
+                            camera_angle_deg = self.camera_angle_deg,
+                            dec_position_deg = mount_dec_deg,
                         )
 
                         self.joystick_ra_offset_deg = _clamp(
-                            self.joystick_ra_offset_deg + joystick_ra_add,
+                            self.joystick_ra_offset_deg + joystick_ra_add* self.manual_speed_max_dec_ra_s * dt,
                             -self.manual_trim_limit_deg,
                             self.manual_trim_limit_deg,
                         )
                         self.joystick_dec_offset_deg = _clamp(
-                            self.joystick_dec_offset_deg + joystick_dec_add,
+                            self.joystick_dec_offset_deg + joystick_dec_add * self.manual_speed_max_ra_deg_s * dt,
                             -self.manual_trim_limit_deg,
                             self.manual_trim_limit_deg,
                         )
@@ -1257,14 +1257,14 @@ class AstronomicOperator:
                 self.joystick_ra_offset_deg = 0.0
                 self.joystick_dec_offset_deg = 0.0
                 joystick_ra_add, joystick_dec_add = self.x_y_to_ha_dec(
-                            x_deg=jx * self.manual_speed_max_dec_deg_s * dt,
-                            y_deg=jy * self.manual_speed_max_ra_deg_s * dt,
-                            camera_angle_deg=self.camera_angle_deg,
-                            dec_position_deg=dec_ref_for_manual,
+                            x_deg = jx,
+                            y_deg = jy,
+                            camera_angle_deg = self.camera_angle_deg,
+                            dec_position_deg = dec_ref_for_manual,
                         )
                 if manual_input_active:
-                    desired_ha_deg += joystick_ra_add
-                    desired_dec_deg += joystick_dec_add
+                    desired_ha_deg += joystick_ra_add * self.manual_speed_max_ra_deg_s * dt
+                    desired_dec_deg += joystick_dec_add * self.manual_speed_max_dec_deg_s * dt
                 if compensate_earth_rotation:
                     desired_ha_deg += self.sidereal_ra_deg_s * dt
 
