@@ -558,8 +558,9 @@ class AstronomicOperator:
         self.joystick_ra_offset_deg = 0.0
         self.joystick_dec_offset_deg = 0.0
         self.sidereal_ra_deg_s = 360.0 / 86164.0905
-        self.manual_speed_max_ra_deg_s = 100.0 * self.sidereal_ra_deg_s
+        self.manual_speed_max_ra_deg_s = 1000.0 * self.sidereal_ra_deg_s
         self.manual_speed_max_dec_deg_s = self.manual_speed_max_ra_deg_s / 24.0
+        self.deadzone_around_polaris_deg = 5.0
 
         self.last_ra_step = 0
         self.last_dec_step = 0
@@ -837,7 +838,7 @@ class AstronomicOperator:
     def x_y_to_ha_dec(self, x_deg, y_deg, camera_angle_deg, dec_position_deg):
         delta_x, delta_y = self.rotate_x_y_by_angle_deg(x_deg, y_deg, camera_angle_deg)
         # For small DEC angles, the HA correction becomes unstable (division by sin(dec) ~ 0), so we can approximate:
-        if abs(dec_position_deg) > 5:
+        if abs(dec_position_deg) > self.deadzone_around_polaris_deg:
             ha_offset = delta_y / math.sin(math.radians(dec_position_deg))
             dec_offset = (
                 delta_y * math.cos(math.radians(dec_position_deg))
