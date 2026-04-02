@@ -559,7 +559,7 @@ class AstronomicOperator:
         self.joystick_dec_offset_deg = 0.0
         self.sidereal_ra_deg_s = 360.0 / 86164.0905
         self.manual_speed_max_ra_deg_s = 5.0 * self.sidereal_ra_deg_s
-        self.manual_speed_max_dec_deg_s = self.manual_speed_max_ra_deg_s / 24.0
+        self.manual_speed_max_dec_deg_s = self.manual_speed_max_ra_deg_s / 23.0
 
         self.last_ra_step = 0
         self.last_dec_step = 0
@@ -1219,8 +1219,8 @@ class AstronomicOperator:
                     base_ha_deg, base_dec_deg = mount_ha_deg, mount_dec_deg
                     if manual_input_active:
                         joystick_ra_add, joystick_dec_add = self.x_y_to_ha_dec(
-                            x_deg=jx * self.manual_speed_max_ra_deg_s * dt,
-                            y_deg=jy * self.manual_speed_max_dec_deg_s * dt,
+                            x_deg=jx * self.manual_speed_max_dec_deg_s * dt,
+                            y_deg=jy * self.manual_speed_max_ra_deg_s * dt,
                             camera_angle_deg=self.camera_angle_deg,
                             dec_position_deg=base_dec_deg,
                         )
@@ -1251,8 +1251,8 @@ class AstronomicOperator:
                 self.joystick_ra_offset_deg = 0.0
                 self.joystick_dec_offset_deg = 0.0
                 joystick_ra_add, joystick_dec_add = self.x_y_to_ha_dec(
-                            x_deg=jx * self.manual_speed_max_ra_deg_s * dt,
-                            y_deg=jy * self.manual_speed_max_dec_deg_s * dt,
+                            x_deg=jx * self.manual_speed_max_dec_deg_s * dt,
+                            y_deg=jy * self.manual_speed_max_ra_deg_s * dt,
                             camera_angle_deg=self.camera_angle_deg,
                             dec_position_deg=base_dec_deg,
                         )
