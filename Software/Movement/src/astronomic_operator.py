@@ -558,8 +558,8 @@ class AstronomicOperator:
         self.joystick_ra_offset_deg = 0.0
         self.joystick_dec_offset_deg = 0.0
         self.sidereal_ra_deg_s = 360.0 / 86164.0905
-        self.manual_speed_max_ra_deg_s = 5.0 * self.sidereal_ra_deg_s
-        self.manual_speed_max_dec_deg_s = self.manual_speed_max_ra_deg_s / 23.0
+        self.manual_speed_max_ra_deg_s = 100.0 * self.sidereal_ra_deg_s
+        self.manual_speed_max_dec_deg_s = self.manual_speed_max_ra_deg_s / 24.0
 
         self.last_ra_step = 0
         self.last_dec_step = 0
@@ -570,6 +570,7 @@ class AstronomicOperator:
         self.last_track_send_s = 0.0
         self.last_focus_send_s = 0.0
         self.last_send_heartbeat_s = 0.0
+        self.last_joystick_debug_s = 0.0
         self.last_sent_ra_step = 0
         self.last_sent_dec_step = 0
         self.mount_deadband_steps = 1
@@ -862,7 +863,7 @@ class AstronomicOperator:
             _,polarisDec,_ = self.observer.at(t_now).observe(polaris).apparent().hadec()
             ha_deg = ha.degrees
             dec_deg = dec.degrees
-            polaris_dec_deg = polarisDec.degrees
+            polaris_dec_deg = 90#polarisDec.degrees
 
             ha_calc = - (ha_deg - 90 * sign(ha_deg))
             dec_calc = -sign(ha_deg) * (dec_deg - polaris_dec_deg)
@@ -1199,6 +1200,10 @@ class AstronomicOperator:
             ts_ms = int((shared_data or {}).get("timestamp") or self._current_timestamp_ms())
             desired_ha_deg = float(self.last_ha_deg)
             desired_dec_deg = float(self.last_dec_deg)
+            # Reference DEC used for joystick frame conversion.
+            dec_ref_for_manual = float(desired_dec_deg)
+            joystick_ra_add = 0.0
+            joystick_dec_add = 0.0
 
             if target_selected:
                 hadec = None
@@ -1216,13 +1221,13 @@ class AstronomicOperator:
                     hadec = self._locked_target_hadec
                 if hadec is not None:
                     mount_ha_deg, mount_dec_deg = self.new_ha_dec(*hadec)
-                    base_ha_deg, base_dec_deg = mount_ha_deg, mount_dec_deg
+                    dec_ref_for_manual = float(mount_dec_deg)
                     if manual_input_active:
                         joystick_ra_add, joystick_dec_add = self.x_y_to_ha_dec(
                             x_deg=jx * self.manual_speed_max_dec_deg_s * dt,
                             y_deg=jy * self.manual_speed_max_ra_deg_s * dt,
                             camera_angle_deg=self.camera_angle_deg,
-                            dec_position_deg=base_dec_deg,
+                            dec_position_deg=mount_dec_deg,
                         )
 
                         self.joystick_ra_offset_deg = _clamp(
@@ -1235,8 +1240,8 @@ class AstronomicOperator:
                             -self.manual_trim_limit_deg,
                             self.manual_trim_limit_deg,
                         )
-                    desired_ha_deg = float(base_ha_deg) + float(self.joystick_ra_offset_deg)
-                    desired_dec_deg = float(base_dec_deg) + float(self.joystick_dec_offset_deg)
+                    desired_ha_deg = float(mount_ha_deg) + float(self.joystick_ra_offset_deg)
+                    desired_dec_deg = float(mount_dec_deg) + float(self.joystick_dec_offset_deg)
                     if camera_tracking_enabled:
                         ra_off, dec_off = self._tracking_offsets_deg_locked()
                         desired_ha_deg += ra_off
@@ -1254,7 +1259,7 @@ class AstronomicOperator:
                             x_deg=jx * self.manual_speed_max_dec_deg_s * dt,
                             y_deg=jy * self.manual_speed_max_ra_deg_s * dt,
                             camera_angle_deg=self.camera_angle_deg,
-                            dec_position_deg=base_dec_deg,
+                            dec_position_deg=dec_ref_for_manual,
                         )
                 if manual_input_active:
                     desired_ha_deg += joystick_ra_add
@@ -1321,9 +1326,29 @@ class AstronomicOperator:
                 or int(cmd_dec_step) != int(self.last_dec_step)
             )
             send_interval = 0.4 if slew_throttled else 0.02
+            if manual_input_active and (now - self.last_joystick_debug_s) >= 0.25:
+                print(
+                    "[ASTRO][JOY] "
+                    f"target={target_id} selected={target_selected} "
+                    f"jx={jx:.3f} jy={jy:.3f} "
+                    f"add_ha={float(joystick_ra_add):.6f} add_dec={float(joystick_dec_add):.6f} "
+                    f"off_ha={float(self.joystick_ra_offset_deg):.6f} off_dec={float(self.joystick_dec_offset_deg):.6f} "
+                    f"desired_ha={float(desired_ha_deg):.6f} desired_dec={float(desired_dec_deg):.6f} "
+                    f"cmd_ra={int(cmd_ra_step)} cmd_dec={int(cmd_dec_step)} "
+                    f"fb_ra={ra_feedback_step} fb_dec={dec_feedback_step} "
+                    f"send_interval={float(send_interval):.3f}"
+                )
+                self.last_joystick_debug_s = now
             if (step_changed or heartbeat_due) and (now - self.last_track_send_s) >= send_interval:
                 sent_ra = self.motor_link.send_command(1, "RA", cmd_ra_step)
                 sent_dec = self.motor_link.send_command(1, "DEC", cmd_dec_step)
+                if manual_input_active:
+                    print(
+                        "[ASTRO][JOY][SEND] "
+                        f"cmd_ra={int(cmd_ra_step)} sent_ra={bool(sent_ra)} "
+                        f"cmd_dec={int(cmd_dec_step)} sent_dec={bool(sent_dec)} "
+                        f"dt={float(dt):.4f}"
+                    )
                 if sent_ra:
                     self.last_sent_ra_step = int(cmd_ra_step)
                 if sent_dec:
