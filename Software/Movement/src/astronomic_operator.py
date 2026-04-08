@@ -118,6 +118,7 @@ class MotorLink:
             self.simulate = True
 
     def _build_cmd(self, action, motor=None, value="", value2=""):
+        # Build a comma-separated serial command line from action, motor, and optional values.
         parts = [str(int(action))]
         if motor not in (None, ""):
             parts.append(str(motor).upper())
@@ -128,6 +129,7 @@ class MotorLink:
         return ",".join(parts)
 
     def send_command(self, action, motor=None, value="", value2=""):
+        # Build and send a structured motor command.
         cmd = self._build_cmd(action, motor, value, value2)
         return self.send_raw(cmd, action=action, motor=motor)
 
@@ -195,6 +197,7 @@ class MotorLink:
         return False
 
     def _rx_loop(self):
+        # Continuously read incoming bytes from the serial port until shutdown.
         while not self.shutdown.is_set():
             try:
                 waiting = 0
@@ -221,6 +224,7 @@ class MotorLink:
         if not data:
             return
         self._rx_buffer.extend(data)
+        # Process complete lines from the receive buffer one at a time.
         while True:
             nl_index = self._rx_buffer.find(b"\n")
             if nl_index < 0:
@@ -240,6 +244,7 @@ class MotorLink:
     def _apply_code(self, code, meta):
         motor = (meta or {}).get("motor")
         action = (meta or {}).get("action")
+        # Interpret numeric status codes and update motor/system state.
         if code == 0:
             if motor in self.motor_state:
                 self.motor_state[motor] = "ERROR"
@@ -274,6 +279,7 @@ class MotorLink:
             parsed_motor = None
             parsed_position = None
             raw_line = str(line).strip()
+            # Parse comma-separated response tokens from Arduino.
             parts = [part.strip() for part in raw_line.split(",")] if raw_line else []
             try:
                 if parts:
@@ -293,6 +299,8 @@ class MotorLink:
                     parsed_position = None
 
             if code in (0, 1, 2):
+                # Resolve metadata for this acknowledgement line, using queued pending commands
+                # or in-flight records for global actions.
                 base_meta = meta_override or (self.pending_tx.popleft() if self.pending_tx else None)
                 if code == 2 and base_meta is None:
                     if parsed_motor in self._inflight_by_motor:
@@ -361,6 +369,7 @@ class MotorLink:
         if not self.simulate:
             return
         now = time.time()
+        # Send completed simulated responses once their delay has elapsed.
         while self.sim_pending_done and self.sim_pending_done[0][0] <= now:
             _, meta = self.sim_pending_done.popleft()
             self._on_response_line("2", meta_override=meta)
@@ -369,6 +378,7 @@ class MotorLink:
         text = str(line or "")
         if not text:
             return
+        # Parse free-form debug snapshot text from the Arduino for status updates.
         try:
             mount_match = re.search(r"\bmount=([A-Za-z_]+)", text, flags=re.IGNORECASE)
             if mount_match:
@@ -479,6 +489,7 @@ class MotorLink:
 
 
 class MovementState(Enum):
+    # High-level state of the telescope movement controller.
     IDLE = "IDLE"
     MISSION_TO_TARGET = "MISSION_TO_TARGET"
     TRACKING_WITH_CAMERA = "TRACKING_WITH_CAMERA"
@@ -486,6 +497,10 @@ class MovementState(Enum):
 
 
 class AstronomicOperator:
+    """
+    High-level operator that manages telescope state, tracking, focus,
+    and motor communication.
+    """
     def __init__(
         self,
         base_catalog,
@@ -621,6 +636,7 @@ class AstronomicOperator:
         return bool(self._location_received and self._time_received)
 
     def _init_skyfield(self, data_root):
+        # Initialize Skyfield time and ephemeris data directories and load star catalog.
         if Loader is None:
             self.message = "Skyfield unavailable."
             self.last_error = "Skyfield not installed."
@@ -643,6 +659,7 @@ class AstronomicOperator:
                 self.last_error = str(exc)
 
     def _build_celestial_catalog(self):
+        # Build a lookup of celestial objects by catalog key and name.
         self.celestial_by_key = {}
         if Star is None:
             return
@@ -820,6 +837,7 @@ class AstronomicOperator:
 
     @staticmethod
     def new_ha_dec(ha, dec):
+        # Normalize raw hour-angle and declination into the mount frame.
         new_ha = (ha % 360.0 - 90.0) % 180.0 - 90.0
         if ha == -90:
             new_ha = 90.0
@@ -830,12 +848,14 @@ class AstronomicOperator:
     
     
     def rotate_x_y_by_angle_deg(self, x, y, angle_deg):
+        # Rotate a 2D vector by the given camera angle in degrees.
         a = math.radians(float(angle_deg))
         new_x = (x * math.cos(a)) - (y * math.sin(a))
         new_y = (x * math.sin(a)) + (y * math.cos(a))
         return float(new_x), float(new_y)
     
     def x_y_to_ha_dec(self, x_deg, y_deg, camera_angle_deg, dec_position_deg):
+        # Rotate the camera-frame x/y error into HA/DEC offsets, applying the camera angle rotation and declination correction.
         delta_x, delta_y = self.rotate_x_y_by_angle_deg(x_deg, y_deg, camera_angle_deg)
         # For small DEC angles, the HA correction becomes unstable (division by sin(dec) ~ 0), so we can approximate:
         if abs(dec_position_deg) > self.deadzone_around_polaris_deg:
@@ -847,11 +867,12 @@ class AstronomicOperator:
             )
         else:
             ha_offset = 0.0
-            dec_offset = float(delta_x)
+            dec_offset = - float(delta_x)
 
         return float(ha_offset), float(dec_offset)
 
     def _target_hadec(self, target_id, timestamp_ms):
+        # Resolve a catalog target and compute its current hour angle / declination.
         obj = self._resolve_target(target_id)
         polaris = self._resolve_target(11767)
         if obj is None or self.observer is None or self.time_scale is None:
@@ -907,9 +928,10 @@ class AstronomicOperator:
         return int(cur + (max_err if delta > 0 else -max_err))
 
     def _tracking_offsets_deg_locked(self):
+        # Convert camera-frame pixel tracking error into HA/DEC offsets in degrees, applying camera angle rotation.
         w = max(1.0, float(self.tracking_frame_width))
         h = max(1.0, float(self.tracking_frame_height))
-        x_deg = (float(self.tracking_dx) / w) * float(self.fov_x_deg)
+        x_deg = (float(self.tracking_dx) / w) * float(self.fov_x_deg) #pixel/frame_pixel * frame_deg = deg
         y_deg = (-float(self.tracking_dy) / h) * float(self.fov_y_deg)
 
         # Rotate camera-frame correction into mount HA/DEC frame.
@@ -920,6 +942,7 @@ class AstronomicOperator:
         return float(ha_offset), float(dec_offset)
 
     def _sync_time_and_location_from_shared_locked(self, shared_data):
+        # Update location and time from shared telemetry only when new values are meaningful.
         payload = dict(shared_data or {})
         gps = dict(payload.get("gps", {}))
         lat = gps.get("lat")
@@ -952,6 +975,7 @@ class AstronomicOperator:
                 self._set_time_locked(timestamp_ms=parsed_ts)
 
     def _compute_visibility_event_fields_locked(self, cb):
+        # Compute rise/set times and visibility windows for a celestial body.
         rise, set_, visible = self.rising_setting_time(cb)
         rise25, set25 = self.rising_setting_above_alt(cb, 25.0)
         rise45, set45 = self.rising_setting_above_alt(cb, 45.0)
@@ -967,6 +991,7 @@ class AstronomicOperator:
 
     @staticmethod
     def _visibility_level_for_altitude(altitude_deg):
+        # Determine a visibility category based on altitude above the horizon.
         try:
             alt = float(altitude_deg)
         except Exception:
@@ -988,6 +1013,7 @@ class AstronomicOperator:
                 else copy.deepcopy(self.base_catalog)
             )
             if not self.ready or not self.skyfield_ready or self.observer is None:
+                # If system is not fully initialized, return the last known catalog state.
                 return fallback_catalog, 5.0
 
             if (
@@ -1011,6 +1037,7 @@ class AstronomicOperator:
             out = {tab: [] for tab in self.catalog_tabs}
             seen_keys = set()
 
+            # Evaluate visibility for each catalog row and cache results to avoid churn.
             for tab_name, entries in self.base_catalog.items():
                 for raw in entries:
                     key = self._catalog_key(tab_name, raw)
@@ -1074,6 +1101,7 @@ class AstronomicOperator:
                         or abs(float(previous_alt) - rounded_alt) >= float(self.catalog_altitude_epsilon_deg)
                         or previous_row != row
                     ):
+                        # Mark changed when visibility or row content differs significantly.
                         changed = True
 
                     self._catalog_row_cache[key] = {
@@ -1096,6 +1124,7 @@ class AstronomicOperator:
             # Prune removed rows.
             stale_keys = [key for key in self._catalog_row_cache.keys() if key not in seen_keys]
             for key in stale_keys:
+                # Remove stale cached rows that no longer exist in the base catalog.
                 self._catalog_row_cache.pop(key, None)
                 changed = True
 
@@ -1150,6 +1179,7 @@ class AstronomicOperator:
         return MovementState.IDLE
 
     def tick(self, shared_data):
+        # Perform one control-cycle update using shared telemetry and user inputs.
         with self.lock:
             now = time.monotonic()
             dt = 0.04 if self.last_tick_at <= 0 else _clamp(now - self.last_tick_at, 0.001, 0.25)
@@ -1161,6 +1191,7 @@ class AstronomicOperator:
 
             self._update_focus_command_locked(now)
 
+            # Read command and joystick inputs from the shared packet.
             mission = dict((shared_data or {}).get("mission", {}))
             motor_flags = dict((shared_data or {}).get("motor", {}))
             joy = dict((shared_data or {}).get("joystick", {}))
@@ -1168,15 +1199,18 @@ class AstronomicOperator:
             jy = float(joy.get("y", 0.0) or 0.0)
             manual_input_active = (abs(jx) >= self.joystick_deadzone) or (abs(jy) >= self.joystick_deadzone)
 
+            # Determine whether a target mission is selected.
             target_id = str(mission.get("target", "STANDBY"))
             target_selected = target_id.upper() != "STANDBY"
             if target_id.upper() != self.active_target_id:
+                # Reset per-target manual offsets when the target changes.
                 self.active_target_id = target_id.upper()
                 self.joystick_ra_offset_deg = 0.0
                 self.joystick_dec_offset_deg = 0.0
                 self._locked_target_id = None
                 self._locked_target_hadec = None
 
+            # Update camera angle from either motor flags or vision status.
             camera_angle = (
                 motor_flags.get("camera_angle_deg")
                 if "camera_angle_deg" in motor_flags
@@ -1188,6 +1222,7 @@ class AstronomicOperator:
             except Exception:
                 pass
 
+            # Determine active movement modes and whether camera tracking should be engaged.
             tracking_with_camera = bool(motor_flags.get("tracking_with_camera", True))
             compensate_earth_rotation = bool(motor_flags.get("compensate_earth_rotation", True))
             camera_tracking_enabled = bool(tracking_with_camera and self.tracking_enabled and target_selected)
@@ -1198,22 +1233,26 @@ class AstronomicOperator:
                 manual_input_active=manual_input_active,
             )
 
+            # Use the shared timestamp when available, otherwise use local time.
             ts_ms = int((shared_data or {}).get("timestamp") or self._current_timestamp_ms())
             desired_ha_deg = float(self.last_ha_deg)
             desired_dec_deg = float(self.last_dec_deg)
-            # Reference DEC used for joystick frame conversion.
+            
+            # Reference DEC used for manual joystick movement frame conversion.
             dec_ref_for_manual = float(desired_dec_deg)
             joystick_ra_add = 0.0
             joystick_dec_add = 0.0
 
             if target_selected:
                 hadec = None
+                # If earth rotation compensation is enabled, compute live hour-angle/declination.
                 if compensate_earth_rotation:
                     hadec = self._target_hadec(target_id, ts_ms)
                     if hadec is not None:
                         self._locked_target_id = str(target_id)
                         self._locked_target_hadec = (float(hadec[0]), float(hadec[1]))
                 else:
+                    # Use a locked target state to avoid recomputing if rotation compensation is off.
                     if self._locked_target_id != str(target_id) or self._locked_target_hadec is None:
                         locked = self._target_hadec(target_id, ts_ms)
                         if locked is not None:
@@ -1224,6 +1263,7 @@ class AstronomicOperator:
                     mount_ha_deg, mount_dec_deg = self.new_ha_dec(*hadec)
                     dec_ref_for_manual = float(mount_dec_deg)
                     if manual_input_active:
+                        # Convert joystick x/y into mount HA/DEC offsets.
                         joystick_ra_add, joystick_dec_add = self.x_y_to_ha_dec(
                             x_deg = jx,
                             y_deg = jy,
@@ -1231,13 +1271,14 @@ class AstronomicOperator:
                             dec_position_deg = mount_dec_deg,
                         )
 
+                        # Integrate manual joystick offsets over time within trim limits.
                         self.joystick_ra_offset_deg = _clamp(
-                            self.joystick_ra_offset_deg + joystick_ra_add* self.manual_speed_max_dec_ra_s * dt,
+                            self.joystick_ra_offset_deg + joystick_ra_add* self.manual_speed_max_ra_deg_s * dt, #RA axis is typically faster to move, so we can apply a higher speed factor to joystick input for RA.
                             -self.manual_trim_limit_deg,
                             self.manual_trim_limit_deg,
                         )
                         self.joystick_dec_offset_deg = _clamp(
-                            self.joystick_dec_offset_deg + joystick_dec_add * self.manual_speed_max_ra_deg_s * dt,
+                            self.joystick_dec_offset_deg + joystick_dec_add * self.manual_speed_max_dec_deg_s * dt,
                             -self.manual_trim_limit_deg,
                             self.manual_trim_limit_deg,
                         )
@@ -1248,6 +1289,7 @@ class AstronomicOperator:
                         desired_ha_deg += ra_off
                         desired_dec_deg += dec_off
                     else:
+                        # Reset tracking offset values when camera tracking is disabled.
                         self.tracking_ra_offset_deg = 0.0
                         self.tracking_dec_offset_deg = 0.0
             else:
@@ -1263,9 +1305,11 @@ class AstronomicOperator:
                             dec_position_deg = dec_ref_for_manual,
                         )
                 if manual_input_active:
+                    # Apply joystick movement in mount coordinates when no target is selected.
                     desired_ha_deg += joystick_ra_add * self.manual_speed_max_ra_deg_s * dt
                     desired_dec_deg += joystick_dec_add * self.manual_speed_max_dec_deg_s * dt
                 if compensate_earth_rotation:
+                    # Apply sidereal drift correction to RA when no target is selected.
                     desired_ha_deg += self.sidereal_ra_deg_s * dt
 
             desired_ha_deg = _clamp(desired_ha_deg, -90.0, 90.0)
@@ -1293,6 +1337,7 @@ class AstronomicOperator:
                 or str(motor_state.get("RA", "")).upper() == "ERROR"
                 or str(motor_state.get("DEC", "")).upper() == "ERROR"
             ):
+                # Abort movement when the mount controller or a motor reports an error.
                 self.last_error = (
                     "Mount controller is in ERROR state. "
                     "Movement commands are paused until recalibration."
@@ -1322,10 +1367,11 @@ class AstronomicOperator:
                 or manual_drive_active
             )
             heartbeat_due = (now - self.last_send_heartbeat_s) >= 2.0
-            slew_throttled = bool(
+            slew_throttled = bool( #throttle slews to avoid overwhelming the mount with commands when large changes are needed or manual drive is active
                 int(cmd_ra_step) != int(self.last_ra_step)
                 or int(cmd_dec_step) != int(self.last_dec_step)
             )
+            # Use a slower send interval when the commanded target differs from the current desired target.
             send_interval = 0.4 if slew_throttled else 0.02
             if manual_input_active and (now - self.last_joystick_debug_s) >= 0.25:
                 print(
@@ -1341,6 +1387,7 @@ class AstronomicOperator:
                 )
                 self.last_joystick_debug_s = now
             if (step_changed or heartbeat_due) and (now - self.last_track_send_s) >= send_interval:
+                # Send mount commands when movement changed or periodic heartbeat is due.
                 sent_ra = self.motor_link.send_command(1, "RA", cmd_ra_step)
                 sent_dec = self.motor_link.send_command(1, "DEC", cmd_dec_step)
                 if manual_input_active:
@@ -1358,6 +1405,7 @@ class AstronomicOperator:
                 self.last_send_heartbeat_s = now
 
     def print_HaDec(self, cb, name=""):
+        # Convert a celestial body object into normalized HA/DEC values for display.
         if cb is None:
             return None, None
         t_now = self._time_from_ms(self._current_timestamp_ms())
@@ -1386,10 +1434,12 @@ class AstronomicOperator:
             return None, None, False
 
     def rising_setting_above_alt(self, cb, altitude_deg):
+        # Determine times when the celestial body rises above a given altitude.
         if cb is None or almanac is None or self.time_scale is None or self.observer is None:
             return None, None
 
         def predicate(t):
+            # cb is the celestial body object whose altitude is being tested.
             alt, _, _ = self.observer.at(t).observe(cb).apparent().altaz()
             return alt.degrees > float(altitude_deg)
 
@@ -1417,6 +1467,7 @@ class AstronomicOperator:
         return catalog
 
     def status(self):
+        # Return a snapshot of the current operator state for diagnostics.
         with self.lock:
             return {
                 "ready": self.ready,
