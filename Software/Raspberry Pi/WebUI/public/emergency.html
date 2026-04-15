@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StarTrack Emergency Stop</title>
+    <style>
+        :root {
+            color-scheme: dark;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at top, rgba(255, 114, 92, 0.2), transparent 45%),
+                #06080d;
+            color: #f7fbff;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            text-align: center;
+            padding: 24px;
+        }
+
+        .card {
+            max-width: 640px;
+            background: rgba(8, 14, 22, 0.9);
+            border: 1px solid rgba(255, 114, 92, 0.4);
+            border-radius: 20px;
+            padding: 28px;
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+        }
+
+        h1 {
+            margin: 0 0 12px;
+            font-size: 1.6rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        p {
+            margin: 0 0 10px;
+            color: #cdd6e5;
+            line-height: 1.5;
+        }
+
+        .hint {
+            margin-top: 16px;
+            font-size: 0.9rem;
+            color: #9aa7bd;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Emergency Stop Activated</h1>
+        <p>StarTrack is paused for safety. Please make sure everything is OK before restarting.</p>
+        <p>Remote and bridge controls are temporarily disabled.</p>
+        <p class="hint">If this was triggered by mistake, restart the system only after verifying the hardware state.</p>
+    </div>
+</body>
+</html>

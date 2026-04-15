@@ -3,4 +3,6 @@ opencv-python
 pandas
 skyfield
 pyserial
-swoasi
+aiohttp
+pyzmq
+zwoasi
