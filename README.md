@@ -32,3 +32,8 @@ Aiming towards the sun
   </tr>
 </table>
 
+<img width="1920" height="1080" alt="ui_1" src="https://github.com/user-attachments/assets/fb1ac00f-f592-4a4b-8867-327139e7bd11" />
+<img width="1920" height="1080" alt="ui_2" src="https://github.com/user-attachments/assets/86f4978c-f0b8-40c6-88b1-81f5d652a89e" />
+<img width="3024" height="4032" alt="monture" src="https://github.com/user-attachments/assets/9c80af70-225b-4b54-857d-dc7891bf7388" />
+
+
