@@ -1,5 +1,3 @@
-
-
 # Star-Track by JVCDLC
 
 <p align="center">
@@ -13,16 +11,20 @@ You can find all important information, instructions, and recommendations on our
 
 Aiming towards the sun
 
-<table border="0">
+<tr>
+    <td>
+      <video src="https://github.com/user-attachments/assets/175ef95b-0138-4629-bef2-cc6909bee551" width="100%" autoplay loop muted playsinline></video>
+    </td>
+    <td>
+      <video src="https://github.com/user-attachments/assets/3bd77a46-6f4f-4f7e-8b46-55b38fbb0885" width="100%" autoplay loop muted playsinline></video>
+    </td>
+  </tr>
   <tr>
     <td>
-      <video src="https://github.com/user-attachments/assets/175ef95b-0138-4629-bef2-cc6909bee551" width="200%" controls></video>
+      <video src="https://github.com/user-attachments/assets/4f6650a6-e811-410a-84ff-8f54c2681792" width="100%" autoplay loop muted playsinline></video>
     </td>
     <td>
-      <video src="https://github.com/user-attachments/assets/3bd77a46-6f4f-4f7e-8b46-55b38fbb0885" width="100%" controls></video>
-    </td>
-    <td>
-      <video src="https://github.com/user-attachments/assets/4f6650a6-e811-410a-84ff-8f54c2681792" width="100%" controls></video>
+      <video src="PASTE_YOUR_4TH_VIDEO_URL_HERE" width="100%" autoplay loop muted playsinline></video>
     </td>
   </tr>
 </table>
