@@ -16,21 +16,18 @@ Aiming towards the sun
 <table border="0">
   <tr>
     <td>
-      <video src="[URL_TO_VIDEO_1](https://github.com/user-attachments/assets/175ef95b-0138-4629-bef2-cc6909bee551)" width="100%" controls></video>
+      <video src="https://github.com/user-attachments/assets/175ef95b-0138-4629-bef2-cc6909bee551" width="200%" controls></video>
     </td>
     <td>
-      <video src="[URL_TO_VIDEO_2](https://github.com/user-attachments/assets/2e12e813-122e-4ef5-ad5c-3ab0d7501e26)" width="100%" controls></video>
-    </td>
-  </tr>
-  <tr>
-    <td>
-      <video src="[URL_TO_VIDEO_3](https://github.com/user-attachments/assets/3bd77a46-6f4f-4f7e-8b46-55b38fbb0885)" width="100%" controls></video>
+      <video src="https://github.com/user-attachments/assets/3bd77a46-6f4f-4f7e-8b46-55b38fbb0885" width="100%" controls></video>
     </td>
     <td>
-      <video src="[URL_TO_VIDEO_4](https://github.com/user-attachments/assets/3bd77a46-6f4f-4f7e-8b46-55b38fbb0885)" width="100%" controls></video>
+      <video src="https://github.com/user-attachments/assets/4f6650a6-e811-410a-84ff-8f54c2681792" width="100%" controls></video>
     </td>
   </tr>
 </table>
+
+
 
 <img width="1920" height="1080" alt="ui_1" src="https://github.com/user-attachments/assets/fb1ac00f-f592-4a4b-8867-327139e7bd11" />
 <img width="1920" height="1080" alt="ui_2" src="https://github.com/user-attachments/assets/86f4978c-f0b8-40c6-88b1-81f5d652a89e" />
