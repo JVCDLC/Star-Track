@@ -13,15 +13,22 @@ You can find all important information, instructions, and recommendations on our
 
 Aiming towards the sun
 
-Initial calibration
-
-
-
-https://github.com/user-attachments/assets/175ef95b-0138-4629-bef2-cc6909bee551
-
-
-
-Orientation towards the sun
-
-https://github.com/user-attachments/assets/3bd77a46-6f4f-4f7e-8b46-55b38fbb0885
+<table border="0">
+  <tr>
+    <td>
+      <video src="[URL_TO_VIDEO_1](https://github.com/user-attachments/assets/175ef95b-0138-4629-bef2-cc6909bee551)" width="100%" controls></video>
+    </td>
+    <td>
+      <video src="[URL_TO_VIDEO_2](https://github.com/user-attachments/assets/2e12e813-122e-4ef5-ad5c-3ab0d7501e26)" width="100%" controls></video>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <video src="[URL_TO_VIDEO_3](https://github.com/user-attachments/assets/3bd77a46-6f4f-4f7e-8b46-55b38fbb0885)" width="100%" controls></video>
+    </td>
+    <td>
+      <video src="[URL_TO_VIDEO_4](https://github.com/user-attachments/assets/3bd77a46-6f4f-4f7e-8b46-55b38fbb0885)" width="100%" controls></video>
+    </td>
+  </tr>
+</table>
 
