@@ -1,3 +1,5 @@
+
+
 # Star-Track by JVCDLC
 
 <p align="center">
@@ -6,7 +8,20 @@
 
 Star-Track is an open-source project with the goal to create a conversion kit that turns a manual telescope into an automated one. The system automatically finds stars and planets, steers the telescope, and adjusts the focus, making astronomical observation quick and easy.
 
-<video src="assets/orientation_soleil.mp4" controls width="600"></video>
-
 
 You can find all important information, instructions, and recommendations on our wiki: [Star-Track Wiki](https://github.com/JVCDLC/Star-Track/wiki)
+
+Aiming towards the sun
+
+Initial calibration
+
+
+
+https://github.com/user-attachments/assets/175ef95b-0138-4629-bef2-cc6909bee551
+
+
+
+Orientation towards the sun
+
+https://github.com/user-attachments/assets/3bd77a46-6f4f-4f7e-8b46-55b38fbb0885
+
