@@ -9,8 +9,6 @@ Star-Track is an open-source project with the goal to create a conversion kit th
 
 You can find all important information, instructions, and recommendations on our wiki: [Star-Track Wiki](https://github.com/JVCDLC/Star-Track/wiki)
 
-Aiming towards the sun
-
 <tr>
     <td>
       <video src="https://github.com/user-attachments/assets/175ef95b-0138-4629-bef2-cc6909bee551" width="100%" autoplay loop muted playsinline></video>
