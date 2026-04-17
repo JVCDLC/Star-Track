@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# =============================================================================
+# StarTrack launcher (Linux / Raspberry Pi)
+# -----------------------------------------------------------------------------
+# Purpose:
+# - Manage network mode (offline AP or online Wi-Fi profile)
+# - Start/stop WebUI backend in hardware or simulation mode
+# - Keep run metadata in PID/log files for service-like operation
+#
+# Notes:
+# - This script only orchestrates processes and environment variables.
+# - Application runtime logic remains in WebUI/main.py.
+# =============================================================================
+
 # -------------------------
 # Configuration
 # -------------------------
@@ -27,10 +40,12 @@ SIM_ARDUINO_DEFAULT="${SIM_ARDUINO_DEFAULT:-auto}" # auto | on | off
 ARDUINO_PORT_DEFAULT="${ARDUINO_PORT_DEFAULT:-auto}" # auto | /dev/ttyUSB0 | COM6 ...
 ARDUINO_BAUD_DEFAULT="${ARDUINO_BAUD_DEFAULT:-115200}"
 
+# Basic timestamped logger helper used by all script actions.
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
 }
 
+# Error logger helper (stderr).
 err() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2
 }
@@ -53,6 +68,7 @@ Examples:
 EOF
 }
 
+# Guard utility for required external commands.
 require_cmd() {
     command -v "$1" >/dev/null 2>&1 || {
         err "Missing required command: $1"
@@ -60,6 +76,7 @@ require_cmd() {
     }
 }
 
+# Resolve Python interpreter from known virtualenv locations.
 resolve_python_bin() {
     local candidate
     for candidate in "${VENV_CANDIDATES[@]}"; do
@@ -75,6 +92,7 @@ resolve_python_bin() {
     exit 1
 }
 
+# Process liveness check using PID file.
 is_running() {
     if [[ -f "$PID_FILE" ]]; then
         local pid
@@ -86,6 +104,7 @@ is_running() {
     return 1
 }
 
+# Stop backend and release the configured listening port.
 stop_system() {
     log "Stopping StarTrack services..."
     if is_running; then
@@ -106,6 +125,7 @@ stop_system() {
     sudo fuser -k "${SERVER_PORT}/tcp" 2>/dev/null || true
 }
 
+# Start backend with mode-specific simulation flags.
 start_app() {
     local mode="${1:-$MODE_DEFAULT}"
     if [[ "$mode" != "hardware" && "$mode" != "sim" ]]; then
@@ -175,6 +195,7 @@ start_app() {
     fi
 }
 
+# Configure local Wi-Fi hotspot mode (offline operation).
 setup_offline_network() {
     require_cmd nmcli
     log "Initializing OFFLINE (AP) mode on $INTERFACE..."
@@ -201,6 +222,7 @@ setup_offline_network() {
     sudo nmcli connection up "$HOTSPOT_NAME"
 }
 
+# Configure normal online mode using saved home Wi-Fi profile.
 setup_online_network() {
     require_cmd nmcli
     log "Initializing ONLINE (home Wi-Fi) mode..."
@@ -230,6 +252,7 @@ setup_online_network() {
     sudo nmcli connection up "$home_net"
 }
 
+# Print runtime status and key paths.
 show_status() {
     if is_running; then
         log "RUNNING (PID $(cat "$PID_FILE"))"

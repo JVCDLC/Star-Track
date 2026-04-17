@@ -1,14 +1,20 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <!--
+      Emergency page displayed when the backend enters hard-stop mode.
+      This page is intentionally static: no script, no controls, no side effects.
+    -->
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>StarTrack Emergency Stop</title>
     <style>
+        /* Global emergency visual theme */
         :root {
             color-scheme: dark;
         }
 
+        /* Full-screen centered warning card layout */
         body {
             margin: 0;
             min-height: 100vh;
@@ -23,6 +29,7 @@
             padding: 24px;
         }
 
+        /* Main warning card */
         .card {
             max-width: 640px;
             background: rgba(8, 14, 22, 0.9);
@@ -32,6 +39,7 @@
             box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
         }
 
+        /* Title and copy styles */
         h1 {
             margin: 0 0 12px;
             font-size: 1.6rem;
@@ -45,6 +53,7 @@
             line-height: 1.5;
         }
 
+        /* Secondary operational hint */
         .hint {
             margin-top: 16px;
             font-size: 0.9rem;
@@ -53,6 +62,7 @@
     </style>
 </head>
 <body>
+    <!-- Emergency content: intentionally read-only -->
     <div class="card">
         <h1>Emergency Stop Activated</h1>
         <p>StarTrack is paused for safety. Please make sure everything is OK before restarting.</p>

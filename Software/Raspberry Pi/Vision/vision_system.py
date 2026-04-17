@@ -1,3 +1,16 @@
+"""
+Star-Track vision/autofocus runtime (standalone utility).
+
+This module provides:
+1) frame processing (target center + focus score),
+2) autofocus sweep analysis over multiple passes,
+3) an Arduino bridge with optional physics simulation,
+4) a display loop that correlates frame and motor step.
+
+The comments in this file are intentionally operational and maintenance-focused,
+so the calibration/tracking flow is easy to debug without changing behavior.
+"""
+
 import cv2
 import numpy as np
 import zmq
@@ -21,7 +34,14 @@ UI_HEIGHT = 150
 SIM_VIDEO_DEFAULT = Path(__file__).resolve().parents[1] / "WebUI" / "simulation.mp4"
 
 def draw_hud(data, current_step, state, focus_score, current_frame):
-    """Draws a dedicated UI panel at the bottom of the screen with a clean graph."""
+    """
+    Build the lower diagnostic panel shown under the live frame.
+
+    Interaction notes:
+    - Uses the autofocus sample history (`data`) to draw a focus curve.
+    - Uses `current_step` to place a red vertical marker on that curve.
+    - Shows state-machine text so operators can correlate motion with analysis.
+    """
     ui = np.zeros((UI_HEIGHT, VIDEO_WIDTH, 3), dtype=np.uint8)
     
     # Grid lines and UI background
@@ -62,7 +82,13 @@ def draw_hud(data, current_step, state, focus_score, current_frame):
     return ui
 
 def put_text_outline(img, text, pos, color=(0, 255, 0)):
-    """Draws highly visible text over the video feed."""
+    """
+    Draw text with an outline to stay legible against bright stars/noise.
+
+    The function always draws twice:
+    1) thick black stroke,
+    2) colored foreground.
+    """
     cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3) # Outline
     cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)     # Inner
 
@@ -71,9 +97,28 @@ def put_text_outline(img, text, pos, color=(0, 255, 0)):
 # ==========================================
 class VisionProcessor:
     def __init__(self, scale=0.5):
+        """
+        Create the frame processor.
+
+        `scale` controls downsampling before contour/focus analysis:
+        lower values are faster, higher values keep more detail.
+        """
         self.scale = scale
 
     def process_frame(self, frame):
+        """
+        Process one frame and return:
+        - annotated frame copy,
+        - scalar focus score,
+        - detected target center in full-resolution coordinates (or None).
+
+        Pipeline:
+        1) resize and grayscale,
+        2) blur + Otsu threshold + morphology for robust blob mask,
+        3) largest contour center extraction,
+        4) Laplacian variance focus metric over masked region.
+        """
+        # Normalize input resolution first so downstream thresholds stay consistent.
         # Force frame to standard size for consistency
         frame = cv2.resize(frame, (VIDEO_WIDTH, VIDEO_HEIGHT))
         original = frame.copy()
@@ -108,14 +153,29 @@ class VisionProcessor:
 # ==========================================
 class AutofocusAnalyzer:
     def __init__(self, threshold_ratio=0.5, smoothing_window=5):
+        """
+        Hold sweep samples and compute best-focus positions.
+
+        `threshold_ratio` and `smoothing_window` tune how aggressive pass-2
+        narrowing is around the peak.
+        """
         self.data =[]  
         self.threshold_ratio = threshold_ratio
         self.smoothing_window = smoothing_window
 
     def add_data_point(self, step, focus_score):
+        """Append one sample pair `(axis_position, focus_score)` to current pass history."""
         self.data.append((step, focus_score))
 
     def analyze_sweep(self, pass_number):
+        """
+        Analyze collected samples and return `(best_step, (start_step, end_step))`.
+
+        Pass behavior:
+        - pass 1: broad coarse window around peak,
+        - pass 2: threshold-ratio based narrowing around peak,
+        - pass 3+: lock directly on best step.
+        """
         if len(self.data) < self.smoothing_window:
             return None, None
 
@@ -153,6 +213,7 @@ class AutofocusAnalyzer:
         return float(best_step), (float(min(start_step, end_step)), float(max(start_step, end_step)))
 
     def reset(self):
+        """Clear pass samples before starting a new sweep segment."""
         self.data =[]
 
     def analyze_timed_sweep(self, pass_number, start_step, target_step, start_time, end_time):
@@ -178,6 +239,11 @@ class AutofocusAnalyzer:
 # ==========================================
 class PID:
     def __init__(self, kp, ki, kd, out_max):
+        """
+        Generic PID container used by simulation-only motion models.
+
+        - `out_max` caps command magnitude to keep simulation stable.
+        """
         self.kp = kp
         self.ki = ki
         self.kd = kd
@@ -186,6 +252,11 @@ class PID:
         self.prev_error = 0.0
 
     def compute(self, error, dt):
+        """
+        Compute PID output for current error/time-step.
+
+        The result is saturated to `[-out_max, +out_max]`.
+        """
         self.integral += error * dt
         derivative = (error - self.prev_error) / dt if dt > 0 else 0
         self.prev_error = error
@@ -194,11 +265,17 @@ class PID:
 
 class ArduinoController:
     def __init__(self, simulate=False, port='auto', baudrate=115200):
+        """
+        Focus-axis bridge:
+        - hardware mode: send/receive serial commands from Arduino firmware,
+        - simulation mode: emulate position/speed behavior with dual PID physics.
+        """
         self.simulate = simulate
         self.cmd_queue = queue.Queue()
         self.response_queue = queue.Queue()
         self.running = True
 
+        # Simulation state mirrors focus-axis behavior in "good enough" physics terms.
         # --- Simulated Physics State ---
         self.current_pos = 0.0
         self.current_vel = 0.0
@@ -226,12 +303,17 @@ class ArduinoController:
         self.thread.start()
 
     def _detect_port(self):
+        """Pick the most likely Arduino serial port from available devices."""
+        # Auto-select best candidate serial port when explicit port is not provided.
         if list_ports is None:
             return '/dev/ttyUSB0'
         ports = list(list_ports.comports())
         if not ports:
             return '/dev/ttyUSB0'
         def score(p):
+            """
+            Rank serial-port candidates so Arduino-like devices are selected first.
+            """
             text = " ".join([str(p.device), str(p.description), str(p.hwid)]).lower()
             s = 0
             if "arduino" in text: s += 20
@@ -242,9 +324,17 @@ class ArduinoController:
         return sorted(ports, key=score, reverse=True)[0].device
 
     def get_current_position(self):
+        """Return current focus position estimate (ticks)."""
         return self.current_pos
 
     def send_command(self, action, motor, value="", value2=""):
+        """
+        Queue a command using the same CSV protocol as the refactored firmware.
+
+        Examples:
+        - `1,FOC,<target_ticks>`
+        - `2,FOC,<target_ticks>,<ticks_per_second>`
+        """
         if value2 != "":
             cmd_str = f"{action},{motor},{value},{value2}"
         else:
@@ -253,12 +343,23 @@ class ArduinoController:
         print(f"[Arduino TX] {cmd_str}")
 
     def check_response(self):
+        """Non-blocking pop of the latest Arduino response code ('0'/'1'/'2')."""
         try:
             return self.response_queue.get_nowait()
         except queue.Empty:
             return None
 
     def _worker(self):
+        """
+        Background execution loop.
+
+        Responsibilities:
+        - consume queued commands,
+        - step simulation physics (when simulate=True),
+        - forward serial I/O and acknowledgments (when simulate=False),
+        - keep command/response timing deterministic enough for autofocus tests.
+        """
+        # Single background worker for both hardware IO and simulation stepping.
         last_time = time.time()
         
         while self.running:
@@ -340,6 +441,7 @@ class ArduinoController:
                     self.response_queue.put(response)
                     print(f"[Arduino RX] {response}")
                     
+            # Keep worker deterministic enough for repeatable focus tests.
             time.sleep(0.005) # Run physics loop at 200Hz
 
 # ==========================================
@@ -347,6 +449,12 @@ class ArduinoController:
 # ==========================================
 class CameraSource:
     def __init__(self, use_zmq=False, source="ipc:///tmp/video_feed"):
+        """
+        Frame source abstraction.
+
+        - ZMQ mode: consume live frames from publisher socket.
+        - Video mode: map focus step to deterministic frame index in replay clip.
+        """
         self.use_zmq = use_zmq
         
         if self.use_zmq:
@@ -361,6 +469,12 @@ class CameraSource:
             self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     def get_frame(self, current_step):
+        """
+        Return `(frame_index, frame)`.
+
+        In replay mode, `current_step` is converted into a frame index so
+        autofocus can be debugged deterministically frame-to-position.
+        """
         if self.use_zmq:
             try:
                 topic, ts_bytes, shape_bytes, frame_bytes = self.sub_socket.recv_multipart(flags=zmq.NOBLOCK)
@@ -385,11 +499,21 @@ class CameraSource:
 # 5. MAIN SYSTEM LOOP
 # ==========================================
 def main(simulate_video, simulate_arduino, video_source):
+    """
+    Main vision runtime loop.
+
+    Flow:
+    1) perform multi-pass autofocus (rewind -> sweep -> analyze),
+    2) lock focus to best step,
+    3) display continuous tracking diagnostics.
+    """
+    # Build the three core subsystems: vision, motion bridge, and frame source.
     processor = VisionProcessor(scale=0.5)
     analyzer = AutofocusAnalyzer()
     arduino = ArduinoController(simulate=simulate_arduino)
     camera = CameraSource(use_zmq=not simulate_video, source=video_source)
 
+    # Finite-state machine controlling autofocus and tracking lifecycle.
     state = "INIT_PASS" 
     
     # PASS STRUCTURE: (Start_Pos, Target_Pos, Target_Speed)
@@ -423,6 +547,7 @@ def main(simulate_video, simulate_arduino, video_source):
         
         # --- STATE MACHINE ---
         if state == "INIT_PASS":
+            # Prepare pass bounds and rewind to pass start.
             if current_pass_idx == 0:
                 pass_start, pass_target, pass_speed = sweep_passes[0]
             else:
@@ -437,10 +562,12 @@ def main(simulate_video, simulate_arduino, video_source):
             state = "WAIT_REWIND"
             
         elif state == "WAIT_REWIND":
+            # Wait until start-position move is fully complete.
             if arduino.check_response() == "2":
                 state = "START_SWEEP"
 
         elif state == "START_SWEEP":
+            # Start sweep command and reset pass accumulator.
             if current_pass_idx == 0:
                 pass_start, pass_target, pass_speed = sweep_passes[0]
             else:
@@ -451,6 +578,7 @@ def main(simulate_video, simulate_arduino, video_source):
             while arduino.check_response() is not None: pass
             
             # CMD 2: Sweep using Speed PID (Speed, Endpoint)
+            # Kept commented intentionally: enables timed synthetic sweep analysis mode.
 #            arduino.send_command(2, "FOC", int(round(pass_target)), float(pass_speed))
             
             analyzer.reset()
@@ -464,6 +592,7 @@ def main(simulate_video, simulate_arduino, video_source):
             analyzer.add_data_point(time.monotonic(), focus_score)
             
             if arduino.check_response() == "2":
+                # Sweep completed: analyze measured data and tighten next pass window.
                 sweep_end_time = time.monotonic()
                 (result_best, result_range), measured_duration = analyzer.analyze_timed_sweep(
                     current_pass_idx + 1,
@@ -500,6 +629,7 @@ def main(simulate_video, simulate_arduino, video_source):
                     state = "INIT_PASS" 
 
         elif state == "LOCK_FOCUS":
+            # Final absolute lock move to the best step from sweep analysis.
             while arduino.check_response() is not None: pass
             
             # CMD 1: Final approach to absolute best spot using Position PID
@@ -507,11 +637,13 @@ def main(simulate_video, simulate_arduino, video_source):
             state = "WAIT_LOCK"
 
         elif state == "WAIT_LOCK":
+            # Wait for final lock completion before entering passive tracking view.
             if arduino.check_response() == "2":
                 state = "TRACKING"
 
         # --- TRACKING / CENTERING LOGIC ---
         elif state == "TRACKING":
+            # Display offset for operator feedback; no active re-centering command here.
             if center:
                 h, w = display_frame.shape[:2]
                 dx, dy = (w // 2) - center[0], (h // 2) - center[1]

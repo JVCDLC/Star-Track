@@ -630,9 +630,25 @@
     </div>
 
     <script>
+        /*
+         * Bridge UI runtime (operator/admin page)
+         * ---------------------------------------
+         * This script manages:
+         * - authenticated bridge websocket session
+         * - system telemetry/control forms
+         * - queue and commander assignment tools
+         * - serial debug panel and manual command forwarding
+         */
+
+
+        // -----------------------------
+        // Frontend state model
+        // -----------------------------
         const state = {
+            // Websocket transport and authentication gate for bridge actions.
             ws: null,
             authenticated: false,
+            // Mission catalog + latest telemetry snapshot from backend.
             catalog: {},
             telemetry: {
                 gps: { lat: 0, lon: 0, alt: 0 },
@@ -654,6 +670,7 @@
                 timestamp: null
             },
             sysInfo: {
+                // Control ownership/queue metadata driven by SYS_INFO packets.
                 commander: "NONE",
                 commander_id: null,
                 users: [],
@@ -662,6 +679,7 @@
                 joystick_user: "NONE",
                 joystick_remaining: null
             },
+            // Timer/UI helpers for streaming, logs, and live clocks.
             reconnectTimer: null,
             toastTimer: null,
             clockTimer: null,
@@ -673,12 +691,17 @@
             serialLines: [],
             serialPollTimer: null,
             serialSeenKeys: new Set(),
+            // Dirty flags avoid wiping operator edits during telemetry hydration.
             dirtyFields: new Set(),
             visibilityHandlerAttached: false,
             commanderSelectionDirty: false
         };
 
+        // -----------------------------
+        // DOM element registry
+        // -----------------------------
         const el = {
+            // Authentication and top-level status widgets.
             loginOverlay: document.getElementById("login-overlay"),
             pinInput: document.getElementById("pin-input"),
             loginBtn: document.getElementById("login-btn"),
@@ -765,12 +788,25 @@
             el.focusInput
         ].filter(Boolean);
 
+        // -----------------------------
+        // Form hydration and dirty-field tracking
+        // -----------------------------
+        /**
+         * markFieldDirty
+         * Mark form fields as locally edited so auto-hydration does not overwrite user input.
+         * @param {*} event Runtime parameter used by this operation.
+         */
         function markFieldDirty(event) {
             if (event && event.target && event.target.id) {
                 state.dirtyFields.add(event.target.id);
             }
         }
 
+        /**
+         * markFieldsDirty
+         * Mark form fields as locally edited so auto-hydration does not overwrite user input.
+         * @param {*} ids Runtime parameter used by this operation.
+         */
         function markFieldsDirty(...ids) {
             ids.forEach((id) => {
                 if (id) {
@@ -779,10 +815,20 @@
             });
         }
 
+        /**
+         * clearDirtyFields
+         * Clear transient state markers once synchronization is complete.
+         * @param {*} ids Runtime parameter used by this operation.
+         */
         function clearDirtyFields(...ids) {
             ids.forEach((id) => state.dirtyFields.delete(id));
         }
 
+        /**
+         * shouldHydrateField
+         * Return whether conditional synchronization/action should proceed.
+         * @param {*} field Runtime parameter used by this operation.
+         */
         function shouldHydrateField(field) {
             return (
                 field &&
@@ -791,6 +837,12 @@
             );
         }
 
+        /**
+         * syncInputField
+         * Synchronize local UI fields/state with authoritative runtime data.
+         * @param {*} field Runtime parameter used by this operation.
+         * @param {*} value Runtime parameter used by this operation.
+         */
         function syncInputField(field, value) {
             if (!shouldHydrateField(field)) {
                 return;
@@ -798,6 +850,12 @@
             field.value = value;
         }
 
+        /**
+         * syncSelectField
+         * Synchronize local UI fields/state with authoritative runtime data.
+         * @param {*} field Runtime parameter used by this operation.
+         * @param {*} value Runtime parameter used by this operation.
+         */
         function syncSelectField(field, value) {
             if (!shouldHydrateField(field)) {
                 return;
@@ -805,6 +863,12 @@
             field.value = value;
         }
 
+        /**
+         * syncCheckedField
+         * Synchronize local UI fields/state with authoritative runtime data.
+         * @param {*} field Runtime parameter used by this operation.
+         * @param {*} checked Runtime parameter used by this operation.
+         */
         function syncCheckedField(field, checked) {
             if (!shouldHydrateField(field)) {
                 return;
@@ -812,6 +876,10 @@
             field.checked = checked;
         }
 
+        /**
+         * updateFocusUi
+         * Update derived UI/runtime state using fresh inputs or telemetry snapshots.
+         */
         function updateFocusUi() {
             const manualMode = el.focusModeSelect.value === "manual";
             el.focusManualGroup.classList.toggle("hidden", !manualMode);
@@ -819,6 +887,11 @@
             el.focusInput.disabled = !manualMode;
         }
 
+        /**
+         * normalizeQueueEntries
+         * Normalize loosely-shaped backend data into consistent frontend structures.
+         * @param {*} entries Runtime parameter used by this operation.
+         */
         function normalizeQueueEntries(entries) {
             if (!Array.isArray(entries)) {
                 return [];
@@ -836,6 +909,11 @@
             });
         }
 
+        /**
+         * findTargetById
+         * Find and return catalog/state objects matching the provided identifier.
+         * @param {*} targetId Runtime parameter used by this operation.
+         */
         function findTargetById(targetId) {
             if (!targetId || targetId === "STANDBY") {
                 return null;
@@ -849,6 +927,11 @@
             return null;
         }
 
+        /**
+         * targetLabelForId
+         * Resolve user-facing mission label from target identifier.
+         * @param {*} targetId Runtime parameter used by this operation.
+         */
         function targetLabelForId(targetId) {
             if (!targetId || targetId === "STANDBY") {
                 return "STANDBY";
@@ -856,6 +939,13 @@
             return findTargetById(targetId)?.name || targetId;
         }
 
+        // -----------------------------
+        // WebSocket transport and login
+        // -----------------------------
+        /**
+         * connectWs
+         * Establish and monitor websocket connectivity with automatic recovery behavior.
+         */
         function connectWs() {
             const ws = new WebSocket(`wss://${location.host}/ws`);
             state.ws = ws;
@@ -891,6 +981,10 @@
             });
         }
 
+        /**
+         * scheduleReconnect
+         * Schedule delayed retry/recovery work while avoiding duplicate timers.
+         */
         function scheduleReconnect() {
             if (state.reconnectTimer) {
                 return;
@@ -901,10 +995,19 @@
             }, 1500);
         }
 
+        /**
+         * login
+         * Send bridge authentication data and transition into authenticated control mode.
+         */
         function login() {
             sendPacket({ type: "LOGIN_BRIDGE", pin: el.pinInput.value.trim() });
         }
 
+        /**
+         * sendPacket
+         * Build and send a command/request packet to the backend transport layer.
+         * @param {*} payload Runtime parameter used by this operation.
+         */
         function sendPacket(payload) {
             if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
                 showToast("Connection is not ready.");
@@ -914,7 +1017,13 @@
             return true;
         }
 
+        /**
+         * handlePacket
+         * Handle incoming events/packets and route them to the correct state transitions.
+         * @param {*} packet Runtime parameter used by this operation.
+         */
         function handlePacket(packet) {
+            // Authentication success unlocks full bridge tooling UI.
             if (packet.type === "LOGIN_SUCCESS") {
                 state.authenticated = true;
                 el.loginOverlay.style.display = "none";
@@ -931,28 +1040,33 @@
                 return;
             }
 
+            // Initial snapshot immediately after connect/login.
             if (packet.type === "FULL_STATE") {
                 state.catalog = packet.catalog || state.catalog;
                 applyTelemetry(packet.data || {});
                 return;
             }
 
+            // Role/ownership queue changes pushed by backend.
             if (packet.type === "SYS_INFO") {
                 applySysInfo(packet);
                 return;
             }
 
+            // Telemetry stream updates all runtime readouts and controls.
             if (packet.type === "TELEMETRY") {
                 applyTelemetry(packet.data || {});
                 return;
             }
 
+            // Catalog updates should refresh mission-related displays.
             if (packet.type === "CATALOG_UPDATE") {
                 state.catalog = packet.catalog || {};
                 renderTelemetry();
                 return;
             }
 
+            // Safety redirect when emergency mode is active.
             if (packet.type === "EMERGENCY_STOP") {
                 window.location.href = "/";
                 return;
@@ -963,7 +1077,16 @@
             }
         }
 
+        // -----------------------------
+        // Incoming packet application
+        // -----------------------------
+        /**
+         * applySysInfo
+         * Apply incoming runtime data onto local state, controls, and dependent UI sections.
+         * @param {*} packet Runtime parameter used by this operation.
+         */
         function applySysInfo(packet) {
+            // Keep previous owner/commander for change-detection log messages.
             const previousCommander = state.sysInfo.commander;
             const previousJoystickUser = state.sysInfo.joystick_user;
             state.sysInfo = {
@@ -986,7 +1109,13 @@
             }
         }
 
+        /**
+         * applyTelemetry
+         * Apply incoming runtime data onto local state, controls, and dependent UI sections.
+         * @param {*} data Runtime parameter used by this operation.
+         */
         function applyTelemetry(data) {
+            // Deep merge allows partial telemetry packets without losing prior nested values.
             state.telemetry = {
                 ...state.telemetry,
                 ...data,
@@ -1002,6 +1131,7 @@
             };
 
             if (data.timestamp !== undefined && data.timestamp !== null) {
+                // Use monotonic perf timer to smoothly advance UI clock from backend timestamp.
                 state.lastTimestampMs = Number(data.timestamp);
                 state.lastTimestampPerf = performance.now();
             }
@@ -1010,6 +1140,10 @@
             renderTelemetry();
         }
 
+        /**
+         * hydrateControls
+         * Hydrate editable controls from telemetry while respecting dirty-field protection.
+         */
         function hydrateControls() {
             const gps = state.telemetry.gps;
             syncInputField(el.gpsLatInput, formatNumber(gps.lat, 6));
@@ -1044,6 +1178,13 @@
             updateFocusUi();
         }
 
+        // -----------------------------
+        // Rendering helpers
+        // -----------------------------
+        /**
+         * renderSysInfo
+         * Render UI fragments from the latest frontend state and refresh visible DOM nodes.
+         */
         function renderSysInfo() {
             const queueEntries = normalizeQueueEntries(state.sysInfo.joystick_queue);
             el.commanderText.textContent = state.sysInfo.commander || "NONE";
@@ -1077,6 +1218,10 @@
             });
         }
 
+        /**
+         * renderTelemetry
+         * Render UI fragments from the latest frontend state and refresh visible DOM nodes.
+         */
         function renderTelemetry() {
             const gps = state.telemetry.gps;
             const joystick = state.telemetry.joystick;
@@ -1101,6 +1246,10 @@
             applyInitializationLock();
         }
 
+        /**
+         * applyInitializationLock
+         * Apply incoming runtime data onto local state, controls, and dependent UI sections.
+         */
         function applyInitializationLock() {
             const ready = Boolean(state.telemetry.system?.controls_ready);
             const hardwareReady = Boolean(state.telemetry.system?.hardware_calibrated);
@@ -1184,6 +1333,10 @@
             });
         }
 
+        /**
+         * renderCommanderOptions
+         * Render UI fragments from the latest frontend state and refresh visible DOM nodes.
+         */
         function renderCommanderOptions() {
             const users = Array.isArray(state.sysInfo.users) ? state.sysInfo.users : [];
             const candidates = users.filter((user) => user.role !== "BRIDGE");
@@ -1224,7 +1377,16 @@
             el.setCommanderBtn.disabled = false;
         }
 
+        // -----------------------------
+        // Command dispatch helpers
+        // -----------------------------
+        /**
+         * controlsReadyForType
+         * Return whether command type can be sent under current initialization gates.
+         * @param {*} type Runtime parameter used by this operation.
+         */
         function controlsReadyForType(type) {
+            // Bridge can still send selected setup/debug commands during initialization.
             const allowedDuringInit = new Set([
                 "GPS_UPDATE",
                 "SYNC_CLOCK",
@@ -1243,6 +1405,10 @@
             return false;
         }
 
+        /**
+         * sendGpsFromForm
+         * Build and send a command/request packet to the backend transport layer.
+         */
         function sendGpsFromForm() {
             const lat = Number.parseFloat(el.gpsLatInput.value);
             const lon = Number.parseFloat(el.gpsLonInput.value);
@@ -1257,6 +1423,10 @@
             }
         }
 
+        /**
+         * fillGpsFromDevice
+         * Execute this helper as part of the page runtime state flow.
+         */
         function fillGpsFromDevice() {
             if (!navigator.geolocation) {
                 showToast("Device GPS is unavailable.");
@@ -1278,6 +1448,10 @@
             );
         }
 
+        /**
+         * sendCurrentTime
+         * Build and send a command/request packet to the backend transport layer.
+         */
         function sendCurrentTime() {
             const now = new Date();
             if (sendPacket({ type: "SYNC_CLOCK", timestamp: now.getTime(), datetime: now.toISOString() })) {
@@ -1285,6 +1459,10 @@
             }
         }
 
+        /**
+         * sendManualTime
+         * Build and send a command/request packet to the backend transport layer.
+         */
         function sendManualTime() {
             const raw = el.datetimeInput.value;
             if (!raw) {
@@ -1302,6 +1480,10 @@
             }
         }
 
+        /**
+         * sendCameraSettings
+         * Build and send a command/request packet to the backend transport layer.
+         */
         function sendCameraSettings() {
             if (!controlsReadyForType("CAMERA_SETTINGS")) {
                 return;
@@ -1321,6 +1503,10 @@
             }
         }
 
+        /**
+         * sendMotorSettings
+         * Build and send a command/request packet to the backend transport layer.
+         */
         function sendMotorSettings() {
             if (!controlsReadyForType("MOTOR_SETTINGS")) {
                 return;
@@ -1337,6 +1523,10 @@
             }
         }
 
+        /**
+         * sendFocusSettings
+         * Build and send a command/request packet to the backend transport layer.
+         */
         function sendFocusSettings() {
             if (!controlsReadyForType("FOCUS_SETTINGS")) {
                 return;
@@ -1355,6 +1545,10 @@
             updateFocusUi();
         }
 
+        /**
+         * sendPhotoRequest
+         * Build and send a command/request packet to the backend transport layer.
+         */
         function sendPhotoRequest() {
             if (!controlsReadyForType("PHOTO_REQUEST")) {
                 return;
@@ -1364,6 +1558,10 @@
             }
         }
 
+        /**
+         * sendVideoRequest
+         * Build and send a command/request packet to the backend transport layer.
+         */
         function sendVideoRequest() {
             if (!controlsReadyForType("VIDEO_REQUEST")) {
                 return;
@@ -1375,18 +1573,30 @@
             }
         }
 
+        /**
+         * revokeJoystick
+         * Execute this helper as part of the page runtime state flow.
+         */
         function revokeJoystick() {
             if (sendPacket({ type: "REVOKE_JOYSTICK" })) {
                 addLog("Joystick privilege revoked from bridge.");
             }
         }
 
+        /**
+         * sendEmergencyStop
+         * Build and send a command/request packet to the backend transport layer.
+         */
         function sendEmergencyStop() {
             if (sendPacket({ type: "EMERGENCY_STOP" })) {
                 addLog("Emergency stop sent.");
             }
         }
 
+        /**
+         * setCommander
+         * Execute this helper as part of the page runtime state flow.
+         */
         function setCommander() {
             const selected = el.commanderSelect.value;
             if (!selected) {
@@ -1399,12 +1609,21 @@
             }
         }
 
+        /**
+         * adjustOwnerTime
+         * Execute this helper as part of the page runtime state flow.
+         * @param {*} delta Runtime parameter used by this operation.
+         */
         function adjustOwnerTime(delta) {
             if (sendPacket({ type: "JOYSTICK_OWNER_TIME", delta })) {
                 addLog(`Joystick owner time adjusted by ${delta} seconds.`);
             }
         }
 
+        /**
+         * startClockTicker
+         * Start a recurring loop/stream/poller used by this page runtime.
+         */
         function startClockTicker() {
             if (state.clockTimer) {
                 clearInterval(state.clockTimer);
@@ -1414,6 +1633,10 @@
             }, 1000);
         }
 
+        /**
+         * formatClock
+         * Format raw values into stable, human-readable strings for display.
+         */
         function formatClock() {
             if (Number.isFinite(state.lastTimestampMs)) {
                 const elapsed = performance.now() - state.lastTimestampPerf;
@@ -1436,6 +1659,10 @@
             return "--";
         }
 
+        /**
+         * startVideoStream
+         * Start a recurring loop/stream/poller used by this page runtime.
+         */
         function startVideoStream() {
             if (state.streamTimer) {
                 clearInterval(state.streamTimer);
@@ -1476,6 +1703,13 @@
             }, 4000);
         }
 
+        // -----------------------------
+        // Serial debug panel
+        // -----------------------------
+        /**
+         * fetchSerialEvents
+         * Fetch backend diagnostics data and integrate it into the debug UI.
+         */
         async function fetchSerialEvents() {
             try {
                 const response = await fetch(`/debug/serial?limit=400`, { cache: "no-store" });
@@ -1508,6 +1742,10 @@
             }
         }
 
+        /**
+         * renderSerialEvents
+         * Render UI fragments from the latest frontend state and refresh visible DOM nodes.
+         */
         function renderSerialEvents() {
             if (!el.serialLogOutput) {
                 return;
@@ -1531,6 +1769,10 @@
             });
         }
 
+        /**
+         * sendSerialCommand
+         * Build and send a command/request packet to the backend transport layer.
+         */
         function sendSerialCommand() {
             const command = (el.serialCommandInput.value || "").trim();
             if (!command) {
@@ -1547,6 +1789,10 @@
             }, 250);
         }
 
+        /**
+         * startSerialPolling
+         * Start a recurring loop/stream/poller used by this page runtime.
+         */
         function startSerialPolling() {
             if (state.serialPollTimer) {
                 clearInterval(state.serialPollTimer);
@@ -1555,6 +1801,11 @@
             state.serialPollTimer = setInterval(fetchSerialEvents, 1000);
         }
 
+        /**
+         * addLog
+         * Append runtime/debug information to in-memory UI logs.
+         * @param {*} message Runtime parameter used by this operation.
+         */
         function addLog(message) {
             const line = `[${new Date().toLocaleTimeString()}] ${message}`;
             state.logLines.unshift(line);
@@ -1568,6 +1819,11 @@
             });
         }
 
+        /**
+         * showToast
+         * Execute this helper as part of the page runtime state flow.
+         * @param {*} message Runtime parameter used by this operation.
+         */
         function showToast(message) {
             clearTimeout(state.toastTimer);
             el.toast.textContent = message;
@@ -1577,6 +1833,12 @@
             }, 2600);
         }
 
+        /**
+         * formatNumber
+         * Format raw values into stable, human-readable strings for display.
+         * @param {*} value Runtime parameter used by this operation.
+         * @param {*} digits Runtime parameter used by this operation.
+         */
         function formatNumber(value, digits) {
             const number = Number(value);
             if (!Number.isFinite(number)) {
@@ -1585,6 +1847,13 @@
             return number.toFixed(digits);
         }
 
+        /**
+         * clampNumber
+         * Clamp numeric values into allowed bounds to prevent invalid control payloads.
+         * @param {*} value Runtime parameter used by this operation.
+         * @param {*} min Runtime parameter used by this operation.
+         * @param {*} max Runtime parameter used by this operation.
+         */
         function clampNumber(value, min, max) {
             if (!Number.isFinite(value)) {
                 return min;
@@ -1592,6 +1861,11 @@
             return Math.min(max, Math.max(min, value));
         }
 
+        /**
+         * isoToLocalInputValue
+         * Execute this helper as part of the page runtime state flow.
+         * @param {*} isoString Runtime parameter used by this operation.
+         */
         function isoToLocalInputValue(isoString) {
             if (!isoString) {
                 return "";
@@ -1605,6 +1879,13 @@
             return local.toISOString().slice(0, 19);
         }
 
+        // -----------------------------
+        // Event wiring
+        // -----------------------------
+        /**
+         * wireEvents
+         * Bind DOM events to handlers so interactive controls can trigger runtime actions.
+         */
         function wireEvents() {
             editableFields.forEach((field) => {
                 field.addEventListener("input", markFieldDirty);
@@ -1671,6 +1952,9 @@
             });
         }
 
+        // -----------------------------
+        // Application bootstrap
+        // -----------------------------
         wireEvents();
         updateFocusUi();
         startClockTicker();
@@ -1680,3 +1964,4 @@
     </script>
 </body>
 </html>
+

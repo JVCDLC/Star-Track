@@ -5,6 +5,19 @@ param(
     [string]$Mode = "hardware"
 )
 
+# =============================================================================
+# StarTrack launcher (Windows / development)
+# -----------------------------------------------------------------------------
+# Purpose:
+# - Start/stop the WebUI backend on Windows when Raspberry Pi is unavailable
+# - Keep parity with Linux launcher behavior (mode + serial env variables)
+# - Persist PID and append process output to a shared log file
+#
+# Notes:
+# - Startup semantics are intentionally simple and predictable.
+# - Runtime logic remains in WebUI/main.py.
+# =============================================================================
+
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -18,6 +31,7 @@ $ServerPort = if ($env:STARTRACK_PORT) { $env:STARTRACK_PORT } else { "8443" }
 $ArduinoPort = if ($env:STARTRACK_ARDUINO_PORT) { $env:STARTRACK_ARDUINO_PORT } else { "auto" }
 $ArduinoBaud = if ($env:STARTRACK_ARDUINO_BAUD) { $env:STARTRACK_ARDUINO_BAUD } else { "115200" }
 
+# Resolve Python interpreter from project virtualenv candidates.
 function Resolve-Python {
     $candidates = @(
         (Join-Path $RepoRoot ".venv\Scripts\python.exe"),
@@ -31,6 +45,7 @@ function Resolve-Python {
     throw "Python venv not found. Checked: $($candidates -join ', ')"
 }
 
+# Return backend process from PID file when still alive.
 function Get-RunningProcess {
     if (!(Test-Path $PidFile)) { return $null }
     $pid = Get-Content $PidFile -ErrorAction SilentlyContinue
@@ -42,6 +57,7 @@ function Get-RunningProcess {
     }
 }
 
+# Stop backend process and remove stale PID file.
 function Stop-System {
     $proc = Get-RunningProcess
     if ($proc) {
@@ -53,6 +69,7 @@ function Stop-System {
     }
 }
 
+# Start backend in the selected mode and stream output to log file.
 function Start-System([string]$runMode) {
     if (!(Test-Path $EntryPoint)) {
         throw "Entrypoint not found: $EntryPoint"
@@ -105,6 +122,7 @@ function Start-System([string]$runMode) {
     Write-Host "Started with PID $($proc.Id)"
 }
 
+# Command router.
 switch ($Command) {
     "start" { Start-System $Mode; break }
     "sim" { Start-System "sim"; break }

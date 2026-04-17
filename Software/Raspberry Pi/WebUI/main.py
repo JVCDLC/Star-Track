@@ -1,3 +1,21 @@
+"""
+StarTrack WebUI backend runtime.
+
+This module is the integration hub for the full telescope stack:
+
+1) WebSocket + HTTP API layer (remote control, bridge panel, telemetry stream)
+2) Camera acquisition and media capture orchestration
+3) Vision coordinator state machine (autofocus sweeps + tracking offsets)
+4) Astronomic operator bridge (target conversion + Arduino command flow)
+5) Global initialization/runtime safety gating
+
+Important maintenance note:
+- Keep this file behaviorally stable. Most sections are tightly coupled through
+  shared state (`state.data`) and timed background loops.
+- When changing logic, always validate startup handshake, calibration gates,
+  and command permissions together.
+"""
+
 import argparse
 import asyncio
 import copy
@@ -25,6 +43,9 @@ try:
 except Exception:
     list_ports = None
 
+# -----------------------------------------------------------------------------
+# Path setup and optional astronomy runtime import
+# -----------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ASTRO_SRC_DIR = PROJECT_ROOT / "Software" / "Raspberry Pi" / "Astronomic Operator"
 if str(ASTRO_SRC_DIR) not in sys.path:
@@ -37,6 +58,9 @@ except Exception as exc:
     print(f"Astronomic operator import failed: {exc}")
 
 
+# -----------------------------------------------------------------------------
+# Global configuration constants
+# -----------------------------------------------------------------------------
 SSL_CERT = "cert.pem"
 SSL_KEY = "key.pem"
 ASI_LIB = "/usr/lib/libASICamera2.so"
@@ -56,6 +80,9 @@ VISION_DEBUG_EVENT_LIMIT = 20000
 BACKGROUND_LOOP_INTERVAL_S = 0.05
 CALIBRATION_COMMAND_TIMEOUT_S = 180.0
 
+# -----------------------------------------------------------------------------
+# Mission catalog used by both UI and astronomy runtime
+# -----------------------------------------------------------------------------
 CATALOG = {
     "tab-solar": [
         {"id": "sun", "name": "SUN", "icon": "☀️"},
@@ -161,15 +188,27 @@ SOLAR_TARGET_NAMES = {
 }
 
 
+# -----------------------------------------------------------------------------
+# Utility helpers
+# -----------------------------------------------------------------------------
 def utc_now_iso():
+    """
+    Return a compact UTC ISO timestamp string used in telemetry and log events.
+    """
     return datetime.utcnow().replace(microsecond=0).isoformat()
 
 
 def clamp(value, low, high):
+    """
+    Clamp an integer-like value to [low, high] bounds.
+    """
     return max(low, min(high, value))
 
 
 def _clamp_float(value, low, high):
+    """
+    Clamp a float-convertible value to [low, high] with safe fallback on parse errors.
+    """
     try:
         value = float(value)
     except (TypeError, ValueError):
@@ -178,6 +217,9 @@ def _clamp_float(value, low, high):
 
 
 def parse_datetime_to_ms(value):
+    """
+    Parse ISO-like datetime text into epoch milliseconds (or None when invalid).
+    """
     if not value:
         return None
     try:
@@ -188,6 +230,9 @@ def parse_datetime_to_ms(value):
 
 
 def sanitize_fs_name(value, fallback="UNKNOWN"):
+    """
+    Sanitize dynamic text so it is safe to use as a filesystem folder/file segment.
+    """
     text = str(value or "").strip()
     if not text:
         text = fallback
@@ -197,6 +242,9 @@ def sanitize_fs_name(value, fallback="UNKNOWN"):
 
 
 def mission_target_is_solar(target_id):
+    """
+    Return True when a mission target belongs to the solar catalog group.
+    """
     target = str(target_id or "").strip().upper()
     if not target or target == "STANDBY":
         return False
@@ -220,6 +268,9 @@ def detect_arduino_port(default_port):
         return default_port
 
     def _score(port_info):
+        """
+        Score serial port metadata so Arduino-like devices are prioritized.
+        """
         text = " ".join(
             [
                 str(getattr(port_info, "device", "")),
@@ -243,8 +294,22 @@ def detect_arduino_port(default_port):
     return str(getattr(best, "device", default_port) or default_port)
 
 
+# -----------------------------------------------------------------------------
+# Shared application state model
+# -----------------------------------------------------------------------------
 class SystemState:
+    """
+    In-memory shared backend state.
+
+    This object is the single source of truth for:
+    - websocket clients/roles/queues,
+    - mission + telemetry payload mirrored to UIs,
+    - runtime coordination values used by background tasks.
+    """
     def __init__(self):
+        """
+        Initialize object state used by cross-module orchestration and runtime safety gates.
+        """
         self.clients = {}
         self.client_seq = 0
         self.commander_ws = None
@@ -264,24 +329,30 @@ class SystemState:
         self.clock_base_ms = now_ms
         self.clock_synced_at = time.monotonic()
         self.clock_was_explicitly_synced = False
+        # `catalog` is the visible mission subset, independent from static CATALOG.
         self.catalog = copy.deepcopy(CATALOG)
         self.exchange_log = deque(maxlen=EXCHANGE_LOG_LIMIT)
 
+        # Payload exposed to frontend as `TELEMETRY.data`.
         self.data = {
+            # Core navigation/control context.
             "gps": {"lat": 0.0, "lon": 0.0, "alt": 0.0},
             "joystick": {"x": 0.0, "y": 0.0},
             "mission": {"target": "STANDBY", "action": "--"},
             "timestamp": now_ms,
             "datetime": utc_now_iso(),
+            # Runtime configurable camera and motor behavior.
             "camera": {"exposure": 30000, "gain": 150, "type": "auto"},
             "motor": {
                 "tracking_with_camera": True,
                 "compensate_earth_rotation": True,
             },
+            # Backend runtime mode information (sim/hardware).
             "runtime_modes": {
                 "camera_mode": "hardware",
                 "simulate_arduino": False,
             },
+            # Focus control + capture + subsystem status channels.
             "focus": {"mode": "auto", "manual_value": 50, "manual_ticks": 5058},
             "capture": {
                 "video_duration": 10,
@@ -332,10 +403,16 @@ class SystemState:
         }
 
     def next_request_id(self):
+        """
+        Allocate a monotonically increasing request ID used to track approval workflows end-to-end.
+        """
         self.request_seq += 1
         return self.request_seq
 
     def register(self, ws, ip):
+        """
+        Register a websocket client and seed identity/role metadata consumed by queue and permission logic.
+        """
         self.client_seq += 1
         self.clients[ws] = {
             "id": self.client_seq,
@@ -345,6 +422,9 @@ class SystemState:
         }
 
     def unregister(self, ws):
+        """
+        Detach a websocket client and cleanup commander/joystick/pending-request ownership references.
+        """
         if ws not in self.clients:
             return
 
@@ -367,6 +447,9 @@ class SystemState:
             self.data["joystick"] = {"x": 0.0, "y": 0.0}
 
     def clear_pending_requests_for(self, ws):
+        """
+        Cleanup ephemeral state to prevent stale references and cross-client side effects.
+        """
         stale = []
         for req_id, request in self.pending_requests.items():
             if request["ws"] == ws:
@@ -375,6 +458,9 @@ class SystemState:
             del self.pending_requests[req_id]
 
     def has_pending_request(self, ws, kinds=None):
+        """
+        Return guard conditions used to gate command execution and privilege-sensitive operations.
+        """
         for request in self.pending_requests.values():
             if request["ws"] != ws:
                 continue
@@ -383,34 +469,55 @@ class SystemState:
         return False
 
     def remove_from_commander_queue(self, ws):
+        """
+        Cleanup ephemeral state to prevent stale references and cross-client side effects.
+        """
         self.commander_queue = deque(
             queued_ws for queued_ws in self.commander_queue if queued_ws != ws
         )
 
     def remove_from_joystick_queue(self, ws):
+        """
+        Cleanup ephemeral state to prevent stale references and cross-client side effects.
+        """
         self.joystick_queue = deque(
             entry for entry in self.joystick_queue if entry["ws"] != ws
         )
 
     def client_name(self, ws):
+        """
+        Resolve client identity/role metadata required by permission and queue workflows.
+        """
         client = self.clients.get(ws)
         return client["name"] if client else "Unknown"
 
     def client_id(self, ws):
+        """
+        Resolve client identity/role metadata required by permission and queue workflows.
+        """
         client = self.clients.get(ws)
         return client["id"] if client else None
 
     def client_ws_by_id(self, client_id):
+        """
+        Resolve client identity/role metadata required by permission and queue workflows.
+        """
         for ws, client in self.clients.items():
             if client.get("id") == client_id:
                 return ws
         return None
 
     def client_role(self, ws):
+        """
+        Resolve client identity/role metadata required by permission and queue workflows.
+        """
         client = self.clients.get(ws)
         return client["role"] if client else "OBSERVER"
 
     def client_meta(self, ws):
+        """
+        Resolve client identity/role metadata required by permission and queue workflows.
+        """
         return {
             "client_id": self.client_id(ws),
             "name": self.client_name(ws),
@@ -418,19 +525,34 @@ class SystemState:
         }
 
     def is_commander(self, ws):
+        """
+        Return guard conditions used to gate command execution and privilege-sensitive operations.
+        """
         return ws is not None and ws == self.commander_ws
 
     def is_bridge(self, ws):
+        """
+        Return guard conditions used to gate command execution and privilege-sensitive operations.
+        """
         return self.client_role(ws) == "BRIDGE"
 
     def can_admin(self, ws):
+        """
+        Return guard conditions used to gate command execution and privilege-sensitive operations.
+        """
         return self.is_commander(ws) or self.is_bridge(ws)
 
     def set_client_name(self, ws, name):
+        """
+        Apply a state mutation while preserving invariants relied upon by other runtime stages.
+        """
         if ws in self.clients and name:
             self.clients[ws]["name"] = name[:32]
 
     def set_commander(self, ws, name=None):
+        """
+        Apply a state mutation while preserving invariants relied upon by other runtime stages.
+        """
         if ws not in self.clients or self.is_bridge(ws):
             return False
 
@@ -445,6 +567,9 @@ class SystemState:
         return True
 
     def promote_next_commander(self):
+        """
+        Promote the next eligible user to commander (queue-first, then first non-bridge fallback).
+        """
         while self.commander_queue:
             next_ws = self.commander_queue.popleft()
             if next_ws in self.clients and not self.is_bridge(next_ws):
@@ -459,12 +584,18 @@ class SystemState:
         return None
 
     def has_pending_joystick_request(self):
+        """
+        Return guard conditions used to gate command execution and privilege-sensitive operations.
+        """
         return any(
             request["kind"] in {"JOYSTICK_REQUEST", "JOYSTICK_QUEUE_REQUEST"}
             for request in self.pending_requests.values()
         )
 
     def queue_joystick(self, ws, duration):
+        """
+        Add a client to joystick queue with requested duration if not already queued.
+        """
         if ws not in self.clients:
             return False
         if any(entry["ws"] == ws for entry in self.joystick_queue):
@@ -473,6 +604,9 @@ class SystemState:
         return True
 
     def pop_next_joystick(self):
+        """
+        Pop and return the next queued joystick entry that still belongs to a connected client.
+        """
         while self.joystick_queue:
             entry = self.joystick_queue.popleft()
             if entry["ws"] in self.clients:
@@ -480,6 +614,9 @@ class SystemState:
         return None
 
     def serialize_joystick_queue(self):
+        """
+        Serialize internal state into stable transport payload structures for websocket clients.
+        """
         serialized = []
         for entry in self.joystick_queue:
             ws = entry["ws"]
@@ -495,6 +632,9 @@ class SystemState:
         return serialized
 
     def move_joystick_queue_entry(self, client_id, direction):
+        """
+        Reorder queue/prioritization data while preserving stable client mappings.
+        """
         entries = [entry for entry in self.joystick_queue if entry["ws"] in self.clients]
         index = next(
             (
@@ -514,6 +654,9 @@ class SystemState:
         return True
 
     def remove_joystick_queue_entry_by_id(self, client_id):
+        """
+        Cleanup ephemeral state to prevent stale references and cross-client side effects.
+        """
         removed_ws = None
         filtered = []
         for entry in self.joystick_queue:
@@ -528,6 +671,9 @@ class SystemState:
         return removed_ws
 
     def adjust_joystick_queue_duration(self, client_id, delta_seconds):
+        """
+        Adjust bounded runtime parameters and keep values within safe limits.
+        """
         updated = False
         entries = []
         for entry in self.joystick_queue:
@@ -545,6 +691,9 @@ class SystemState:
         return updated
 
     def sync_clock(self, timestamp_ms=None, datetime_value=None, explicit=False):
+        """
+        Synchronize logical runtime clocks/state with external input values.
+        """
         derived_ms = parse_datetime_to_ms(datetime_value)
         effective_ms = timestamp_ms or derived_ms or int(time.time() * 1000)
         self.clock_base_ms = int(effective_ms)
@@ -554,6 +703,9 @@ class SystemState:
         self.update_clock()
 
     def update_clock(self):
+        """
+        Update internal state using latest telemetry/configuration inputs.
+        """
         elapsed_ms = int((time.monotonic() - self.clock_synced_at) * 1000)
         current_ms = self.clock_base_ms + elapsed_ms
         self.data["timestamp"] = current_ms
@@ -562,12 +714,18 @@ class SystemState:
         ).isoformat(timespec="seconds")
 
     def joystick_remaining(self):
+        """
+        Return remaining joystick lease seconds for active owner, or None when unlimited/not owned.
+        """
         if self.joystick_owner is None or self.joystick_expires_at is None:
             return None
         remaining = int(round(self.joystick_expires_at - time.time()))
         return max(0, remaining)
 
     def adjust_joystick_owner_duration(self, delta_seconds):
+        """
+        Adjust bounded runtime parameters and keep values within safe limits.
+        """
         if self.joystick_owner is None or self.joystick_expires_at is None:
             return False
         remaining = self.joystick_remaining()
@@ -578,6 +736,9 @@ class SystemState:
         return True
 
     def set_temporary_action(self, action, duration_seconds):
+        """
+        Apply a state mutation while preserving invariants relied upon by other runtime stages.
+        """
         current_action = self.data["mission"]["action"]
         if current_action not in {"PHOTO", "VIDEO"}:
             self.last_action_before_temp = current_action
@@ -585,6 +746,9 @@ class SystemState:
         self.action_expires_at = time.time() + max(0, duration_seconds)
 
     def clear_temporary_action_if_needed(self):
+        """
+        Cleanup ephemeral state to prevent stale references and cross-client side effects.
+        """
         if self.action_expires_at is None:
             return False
         if time.time() < self.action_expires_at:
@@ -596,6 +760,9 @@ class SystemState:
         return False
 
     def serialize_pending_requests(self):
+        """
+        Serialize internal state into stable transport payload structures for websocket clients.
+        """
         serialized = []
         for request_id, request in self.pending_requests.items():
             if request["ws"] not in self.clients:
@@ -617,6 +784,9 @@ class SystemState:
         return serialized
 
     def serialize_system_info(self, ws):
+        """
+        Build the canonical `SYS_INFO` payload consumed by remote/bridge UIs for role, queue, and ownership rendering.
+        """
         users = [
             {"id": client["id"], "name": client["name"], "role": client["role"]}
             for client in self.clients.values()
@@ -652,6 +822,9 @@ class SystemState:
         }
 
     def record_exchange(self, direction, payload, ws=None, delivered=True):
+        """
+        Persist normalized RX/TX packet telemetry for audit/debug visibility (memory ring + append-only log file).
+        """
         packet = payload if isinstance(payload, dict) else {"raw": str(payload)}
         event = {
             "ts": utc_now_iso(),
@@ -669,17 +842,35 @@ class SystemState:
             pass
 
     def exchange_snapshot(self, limit=200):
+        """
+        Return a bounded tail of exchange events for diagnostics endpoints without exposing unbounded history.
+        """
         amount = clamp(int(limit), 1, EXCHANGE_LOG_LIMIT)
         return list(self.exchange_log)[-amount:]
 
 
+# Single global state container used by HTTP handlers, WS handlers, and loops.
 state = SystemState()
 
 
+# -----------------------------------------------------------------------------
+# Vision/autofocus coordinator (software-side state machine)
+# -----------------------------------------------------------------------------
 class VisionCoordinator:
+    """
+    Software autofocus/tracking coordinator.
+
+    Responsibilities:
+    - maintain autofocus pass state machine,
+    - correlate frame focus scores with commanded/sensed focus positions,
+    - expose tracking offsets and debug traces for UI and astronomy runtime.
+    """
     TOTAL_FOCUS_STEPS = 10116.0
 
     def __init__(self, init_seconds=VISION_INIT_SECONDS):
+        """
+        Initialize object state used by cross-module orchestration and runtime safety gates.
+        """
         self.init_seconds = max(3.0, float(init_seconds))
         self.active = False
         self.ready = False
@@ -730,9 +921,15 @@ class VisionCoordinator:
         self._reset_pass_ranges()
 
     def _manual_to_step(self):
+        """
+        Convert manual focus percentage into absolute focus ticks.
+        """
         return (float(self.manual_value) / 100.0) * self.TOTAL_FOCUS_STEPS
 
     def _record_focus_debug(self, event_type, **payload):
+        """
+        Append a structured autofocus debug event to memory and debug log file.
+        """
         event = {
             "ts": utc_now_iso(),
             "type": str(event_type),
@@ -752,6 +949,9 @@ class VisionCoordinator:
             pass
 
     def _reset_pass_ranges(self):
+        """
+        Reset autofocus pass ranges to full-span defaults.
+        """
         self.pass_ranges = [
             (0.0, self.TOTAL_FOCUS_STEPS),
             (0.0, self.TOTAL_FOCUS_STEPS),
@@ -759,6 +959,9 @@ class VisionCoordinator:
         ]
 
     def _estimate_step_from_command_time(self, now_ts):
+        """
+        Estimate current focus step from command timing when direct position is not available.
+        """
         start = float(self.sweep_start_step)
         target = float(self.sweep_target_step)
         distance = abs(target - start)
@@ -768,6 +971,9 @@ class VisionCoordinator:
         return float(start + ((target - start) * ratio))
 
     def _effective_capture_time(self, sample_ts):
+        """
+        Estimate center-of-exposure timestamp for each focus sample.
+        """
         exposure_us = 0.0
         try:
             exposure_us = float(state.data.get("camera", {}).get("exposure", 0.0))
@@ -777,6 +983,9 @@ class VisionCoordinator:
         return float(sample_ts) - max(0.0, (exposure_us * 1e-6) * 0.5), exposure_us
 
     def _clear_pending_focus(self):
+        """
+        Clear pending focus command tracking fields after completion/failure.
+        """
         self.pending_focus_command = None
         self.pending_sent_at = 0.0
         self.pending_ack1_received = False
@@ -787,6 +996,9 @@ class VisionCoordinator:
         self.pending_retry_count = 0
 
     def _resend_pending_focus(self, link, reason):
+        """
+        Retry the pending focus command and refresh watchdog timestamps.
+        """
         action = int(self.pending_action or 0)
         target = float(self.pending_target_step)
         sent = False
@@ -826,6 +1038,9 @@ class VisionCoordinator:
         return sent
 
     def _update_tracking_error(self, frame):
+        """
+        Compute frame-center tracking offsets (dx/dy) from detected target contour.
+        """
         if frame is None:
             self.dx = 0.0
             self.dy = 0.0
@@ -864,6 +1079,9 @@ class VisionCoordinator:
             self.tracking_available = False
 
     def update_focus_settings(self, mode, manual_value):
+        """
+        Update internal state using latest telemetry/configuration inputs.
+        """
         if mode in {"auto", "manual"}:
             self.mode = mode
         try:
@@ -877,6 +1095,9 @@ class VisionCoordinator:
             self.current_focus_step = self.best_focus_step
 
     def update_from_frame(self, frame):
+        """
+        Update internal state using latest telemetry/configuration inputs.
+        """
         self._update_tracking_error(frame)
         if frame is not None:
             try:
@@ -915,6 +1136,9 @@ class VisionCoordinator:
                 self.current_focus_step = self._manual_to_step()
 
     def start_focus_calibration(self):
+        """
+        Reset autofocus pass state and transition into pass-1 preparation after hardware calibration is available.
+        """
         self.active = True
         self.ready = False
         self.stage = "focus_prepare_pass_1"
@@ -952,6 +1176,9 @@ class VisionCoordinator:
         )
 
     def stop_for_hardware_reset(self):
+        """
+        Stop autofocus workflow and clear pending focus command state after firmware reset/reboot.
+        """
         # Hardware reboot invalidates current autofocus handshake state.
         self.active = False
         self.ready = False
@@ -976,6 +1203,9 @@ class VisionCoordinator:
             self.current_focus_step = self._manual_to_step()
 
     def _set_next_pass_range(self, pass_index, best_step):
+        """
+        Internal helper used by camera/runtime pipelines to keep data formats and modes consistent.
+        """
         if pass_index not in (0, 1):
             return
         target_width = float(self._desired_pass_span(pass_index + 1))
@@ -991,11 +1221,17 @@ class VisionCoordinator:
         )
 
     def _desired_pass_span(self, pass_index):
+        """
+        Return configured span width for a given autofocus pass index.
+        """
         if pass_index < 0 or pass_index >= len(self.pass_windows):
             return float(self.TOTAL_FOCUS_STEPS)
         return float(max(1.0, min(float(self.pass_windows[pass_index]), float(self.TOTAL_FOCUS_STEPS))))
 
     def _centered_window(self, center_step, width):
+        """
+        Build a centered [low, high] focus window clamped to physical focus limits.
+        """
         target_width = float(max(1.0, min(float(width), float(self.TOTAL_FOCUS_STEPS))))
         pad = target_width / 2.0
         low = float(center_step) - pad
@@ -1019,6 +1255,9 @@ class VisionCoordinator:
         return float(low), float(high)
 
     def _send_focus_position(self, link, target_step, stage_name):
+        """
+        Send a position-mode focus command and initialize pending command tracking.
+        """
         sent = link.send_command(1, "FOC", int(round(target_step)))
         if sent:
             self.pending_focus_command = "REWIND" if "rewind" in stage_name else "LOCK"
@@ -1047,6 +1286,9 @@ class VisionCoordinator:
         return sent
 
     def _send_focus_sweep(self, link, start_step, target_step, speed):
+        """
+        Send a speed-mode focus sweep command and start sample collection state.
+        """
         sent = link.send_command(2, "FOC", int(round(target_step)), float(speed))
         if sent:
             self.pending_focus_command = "SWEEP"
@@ -1082,6 +1324,9 @@ class VisionCoordinator:
         return sent
 
     def _finalize_sweep(self):
+        """
+        Map sweep samples to step estimates and pick the best-focus step for next action.
+        """
         ended_at = time.monotonic()
         duration = max(0.001, ended_at - self.sweep_started_at)
         self.last_sweep_duration_s = duration
@@ -1159,6 +1404,9 @@ class VisionCoordinator:
         return best_step
 
     def handle_arduino_events(self, events, link):
+        """
+        Consume FOC-related ACK events (0/1/2), drive autofocus state transitions, and apply retry/error policy.
+        """
         if not self.active:
             return
 
@@ -1334,6 +1582,9 @@ class VisionCoordinator:
                 )
 
     def tick_autofocus(self, link):
+        """
+        Advance autofocus timing watchdogs and dispatch pending focus commands when state preconditions are met.
+        """
         if not self.active or self.ready:
             return
 
@@ -1379,6 +1630,9 @@ class VisionCoordinator:
             )
 
     def to_payload(self):
+        """
+        Expose the full vision/autofocus status snapshot mirrored directly into `state.data["vision_status"]`.
+        """
         return {
             "active": bool(self.active),
             "ready": self.ready,
@@ -1422,6 +1676,9 @@ class VisionCoordinator:
         }
 
     def debug_snapshot(self, event_limit=500, history_limit=10, sample_limit=2000):
+        """
+        Return deep autofocus debug material (events/history/current samples) for `/debug/vision` inspection.
+        """
         e_lim = max(1, min(int(event_limit), 50000))
         h_lim = max(1, min(int(history_limit), 50))
         s_lim = max(1, min(int(sample_limit), 100000))
@@ -1442,6 +1699,9 @@ class VisionCoordinator:
 
 
 def build_capture_paths(target_id, capture_kind):
+    """
+    Generate deterministic mission-scoped photo/video filesystem paths (date folder + sanitized target folder).
+    """
     now = datetime.now()
     day_folder = now.strftime("%Y-%m-%d")
     mission_folder = sanitize_fs_name(target_id, fallback="STANDBY")
@@ -1454,8 +1714,20 @@ def build_capture_paths(target_id, capture_kind):
     return base_dir, base_dir / filename
 
 
+# -----------------------------------------------------------------------------
+# Runtime orchestration state (hardware calibration + autofocus gating)
+# -----------------------------------------------------------------------------
 class RuntimeOrchestrator:
+    """
+    Cross-subsystem startup orchestration state holder.
+
+    Tracks hardware calibration handshake progress, autofocus readiness,
+    and retry/error-recovery timing between loop iterations.
+    """
     def __init__(self):
+        """
+        Initialize object state used by cross-module orchestration and runtime safety gates.
+        """
         self.hw_calibration_requested = False
         self.hw_calibration_requested_at = 0.0
         self.hw_last_progress_at = 0.0
@@ -1471,9 +1743,13 @@ class RuntimeOrchestrator:
         self.error_recovery_last_at = 0.0
 
     def reset(self):
+        """
+        Reset orchestrator flags before restarting startup/calibration pipeline.
+        """
         self.__init__()
 
 
+# Global runtime singletons (initialized during app startup).
 astro_runtime = None
 vision_runtime = VisionCoordinator()
 runtime_orchestrator = RuntimeOrchestrator()
@@ -1481,8 +1757,22 @@ catalog_refresh_deadline = 0.0
 catalog_last_hash = ""
 
 
+# -----------------------------------------------------------------------------
+# Camera capture/publish service
+# -----------------------------------------------------------------------------
 class CameraManager:
+    """
+    Camera acquisition and media writer service.
+
+    Handles:
+    - live frame acquisition (hardware or simulation),
+    - stream-safe frame conversions,
+    - photo/video capture workers and status reporting.
+    """
     def __init__(self, mode="hardware"):
+        """
+        Initialize object state used by cross-module orchestration and runtime safety gates.
+        """
         self.mode = mode
         self.frame = None
         self.raw_frame = None
@@ -1504,25 +1794,40 @@ class CameraManager:
         self.zmq_socket.bind("ipc:///tmp/video_feed")
 
     def start(self):
+        """
+        Start the camera capture thread.
+        """
         self.thread.start()
 
     def get_frame(self):
+        """
+        Return latest encoded MJPEG frame bytes for stream endpoint.
+        """
         with self.lock:
             return self.frame
 
     def get_raw_frame_copy(self):
+        """
+        Return a copy of the latest runtime BGR frame for processing.
+        """
         with self.lock:
             if self.raw_frame is None:
                 return None
             return self.raw_frame.copy()
 
     def get_save_frame_copy(self):
+        """
+        Return a copy of the highest-fidelity frame used for photo/video capture.
+        """
         with self.lock:
             if self.save_frame is None:
                 return None
             return self.save_frame.copy()    
 
     def apply_camera_settings(self, settings):
+        """
+        Internal helper used by camera/runtime pipelines to keep data formats and modes consistent.
+        """
         if self.camera is None or asi is None:
             return
         try:
@@ -1537,6 +1842,9 @@ class CameraManager:
             print(f"Camera settings update failed: {exc}")
 
     def apply_focus_settings(self, focus):
+        """
+        Internal helper used by camera/runtime pipelines to keep data formats and modes consistent.
+        """
         if self.camera is None or asi is None:
             return
         focus_mode = focus.get("mode", "auto")
@@ -1553,6 +1861,9 @@ class CameraManager:
             print(f"Focus settings update failed: {exc}")
 
     def _init_hardware_camera(self):
+        """
+        Internal helper used by camera/runtime pipelines to keep data formats and modes consistent.
+        """
         if asi is None:
             return False
         try:
@@ -1577,6 +1888,9 @@ class CameraManager:
             return False
 
     def _desired_hardware_image_type(self):
+        """
+        Choose hardware pixel format based on camera mode and current mission target.
+        """
         if asi is None:
             return None, "no_asi"
         camera_type = str(state.data.get("camera", {}).get("type", "auto")).lower()
@@ -1590,6 +1904,9 @@ class CameraManager:
         return int(asi.ASI_IMG_RAW16), "auto_deep"
 
     def _set_hardware_image_type_if_needed(self):
+        """
+        Internal helper used by camera/runtime pipelines to keep data formats and modes consistent.
+        """
         if self.camera is None or asi is None:
             return
         desired_type, reason = self._desired_hardware_image_type()
@@ -1654,6 +1971,9 @@ class CameraManager:
 
     @staticmethod
     def _prepare_frame_for_writer(frame):
+        """
+        Internal helper used by camera/runtime pipelines to keep data formats and modes consistent.
+        """
         if frame is None:
             return None
         out = frame
@@ -1668,10 +1988,16 @@ class CameraManager:
         return out
 
     def _init_simulation(self):
+        """
+        Internal helper used by camera/runtime pipelines to keep data formats and modes consistent.
+        """
         if os.path.exists("simulation.mp4"):
             self.video = cv2.VideoCapture("simulation.mp4")
 
     def _capture_loop(self):
+        """
+        Main capture loop: acquire frames, publish stream bytes, and update shared frame buffers.
+        """
         print(f"[{self.mode.upper()}] Camera loop starting")
 
         if self.mode == "hardware" and not self._init_hardware_camera():
@@ -1747,6 +2073,9 @@ class CameraManager:
             time.sleep(0.04)
 
     def capture_photo(self, output_path):
+        """
+        Save a still frame to disk and return (ok, error_message).
+        """
         frame = self.get_save_frame_copy()
         if frame is None:
             return False, "No video frame available yet."
@@ -1765,6 +2094,9 @@ class CameraManager:
         return True, ""
 
     def _record_video_worker(self, output_path, duration_seconds, fps):
+        """
+        Background worker that writes frames to video file for requested duration.
+        """
         try:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             writer = None
@@ -1808,6 +2140,9 @@ class CameraManager:
                 self.last_recording_error = str(exc)
 
     def start_video_recording(self, output_path, duration_seconds, fps=20):
+        """
+        Start asynchronous video recording if no recording is currently active.
+        """
         with self.recording_lock:
             if self.recording_active:
                 return False, "A video recording is already in progress."
@@ -1824,6 +2159,9 @@ class CameraManager:
             return True, ""
 
     def recording_status(self):
+        """
+        Return current recording state and last recording diagnostics.
+        """
         with self.recording_lock:
             return {
                 "active": bool(self.recording_active),
@@ -1835,7 +2173,13 @@ class CameraManager:
 cam = None
 
 
+# -----------------------------------------------------------------------------
+# WebSocket exchange helpers
+# -----------------------------------------------------------------------------
 def record_exchange(direction, payload, ws=None, delivered=True):
+    """
+    Persist normalized RX/TX packet telemetry for audit/debug visibility (memory ring + append-only log file).
+    """
     state.record_exchange(direction, payload, ws=ws, delivered=delivered)
     if astro_runtime is not None:
         try:
@@ -1849,6 +2193,9 @@ def record_exchange(direction, payload, ws=None, delivered=True):
 
 
 async def safe_send(ws, payload):
+    """
+    Send websocket payload safely while logging delivery success/failure for observability.
+    """
     if ws is None or ws.closed:
         record_exchange("tx", payload, ws=ws, delivered=False)
         return False
@@ -1863,6 +2210,9 @@ async def safe_send(ws, payload):
 
 
 async def send_full_state(ws):
+    """
+    Send initial bootstrap payload so a newly connected client can render immediately.
+    """
     await safe_send(
         ws,
         {
@@ -1880,23 +2230,35 @@ async def send_full_state(ws):
 
 
 async def broadcast_system_info():
+    """
+    Fan out `SYS_INFO` updates to all active clients after role/queue/ownership changes.
+    """
     for ws in list(state.clients.keys()):
         await safe_send(ws, state.serialize_system_info(ws))
 
 
 async def broadcast_catalog():
+    """
+    Fan out latest visible mission catalog to all clients when catalog hash changes.
+    """
     payload = {"type": "CATALOG_UPDATE", "catalog": state.catalog}
     for ws in list(state.clients.keys()):
         await safe_send(ws, payload)
 
 
 async def broadcast_telemetry():
+    """
+    Fan out current telemetry snapshot at loop-defined cadence or after command-side mutations.
+    """
     payload = {"type": "TELEMETRY", "data": state.data}
     for ws in list(state.clients.keys()):
         await safe_send(ws, payload)
 
 
 async def trigger_emergency_stop():
+    """
+    Trigger critical system behavior and propagate safety updates to all clients.
+    """
     if state.emergency_stop:
         return
     state.emergency_stop = True
@@ -1911,6 +2273,9 @@ async def trigger_emergency_stop():
 
 
 async def notify_request(request_id):
+    """
+    Forward queued approval request payloads to commander, with graceful fallback if unavailable.
+    """
     request = state.pending_requests.get(request_id)
     if request is None:
         return
@@ -1950,6 +2315,9 @@ async def notify_request(request_id):
 
 
 async def grant_joystick(ws, duration=None, reason="approved"):
+    """
+    Grant joystick ownership (with optional lease) and revoke previous owner if required.
+    """
     previous_owner = state.joystick_owner
 
     if previous_owner and previous_owner != ws:
@@ -1980,6 +2348,9 @@ async def grant_joystick(ws, duration=None, reason="approved"):
 
 
 async def revoke_joystick(reason="revoked", advance_queue=True):
+    """
+    Revoke current joystick owner, reset vector state, and optionally advance queue.
+    """
     owner = state.joystick_owner
     if owner is None:
         if advance_queue:
@@ -1999,6 +2370,9 @@ async def revoke_joystick(reason="revoked", advance_queue=True):
 
 
 async def grant_next_joystick():
+    """
+    Advance joystick queue and notify next eligible client when ownership becomes available.
+    """
     next_entry = state.pop_next_joystick()
     if next_entry is None:
         await broadcast_system_info()
@@ -2013,6 +2387,9 @@ async def grant_next_joystick():
 
 
 async def manage_joystick_queue(ws, pkt):
+    """
+    Apply admin queue operations (move/remove/duration edits) to joystick queue entries.
+    """
     if not state.can_admin(ws):
         return
 
@@ -2047,6 +2424,9 @@ async def manage_joystick_queue(ws, pkt):
 
 
 async def adjust_joystick_owner_duration(ws, pkt):
+    """
+    Adjust bounded runtime parameters and keep values within safe limits.
+    """
     if not state.can_admin(ws):
         return
     try:
@@ -2060,6 +2440,9 @@ async def adjust_joystick_owner_duration(ws, pkt):
 
 
 def is_command_allowed_during_init(packet_type):
+    """
+    Return guard conditions used to gate command execution and privilege-sensitive operations.
+    """
     return packet_type in {
         "GPS_UPDATE",
         "SYNC_CLOCK",
@@ -2082,6 +2465,10 @@ def is_command_allowed_during_init(packet_type):
 
 
 def refresh_system_status():
+    """
+    Fuse astronomy, vision, and Arduino status into a single UI-facing `system` readiness contract.
+    """
+    # Pull live subsystem status snapshots (with robust fallback when astronomy runtime is missing).
     astro_status = (
         astro_runtime.status()
         if astro_runtime is not None
@@ -2099,6 +2486,7 @@ def refresh_system_status():
         or {}
     )
 
+    # Compute high-level readiness gates consumed by UI lock/unlock logic.
     hardware_calibrated = bool(runtime_orchestrator.hw_calibrated)
     focus_ready = bool(vision_status.get("ready", False))
     astro_ready = bool(astro_status.get("ready", False))
@@ -2121,6 +2509,7 @@ def refresh_system_status():
             waiting.append("astronomic runtime")
         message = f"Waiting for {' and '.join(waiting)}."
 
+    # Mirror detailed subsystem statuses into telemetry payload.
     state.data["vision_status"] = vision_status
     state.data["astronomic_status"] = astro_status
     state.data["arduino_status"] = {
@@ -2136,6 +2525,8 @@ def refresh_system_status():
             "motor_state", {"RA": "UNKNOWN", "DEC": "UNKNOWN", "FOC": "UNKNOWN"}
         ),
     }
+    # Catalog is considered ready once altitude-bearing entries are available
+    # or at least one target is present.
     catalog_has_altitude = any(
         isinstance(entry.get("altitude_deg"), (int, float))
         for entries in state.catalog.values()
@@ -2157,6 +2548,9 @@ def refresh_system_status():
 
 
 def compute_catalog_hash(catalog):
+    """
+    Build stable hash text for catalog change detection.
+    """
     try:
         return json.dumps(catalog, sort_keys=True, ensure_ascii=True)
     except Exception:
@@ -2164,6 +2558,9 @@ def compute_catalog_hash(catalog):
 
 
 async def refresh_catalog_if_due(force=False):
+    """
+    Refresh astronomy visible catalog using adaptive cadence and broadcast when content changed.
+    """
     global catalog_refresh_deadline, catalog_last_hash
     now = time.monotonic()
     if not force and astro_runtime is not None:
@@ -2225,6 +2622,9 @@ async def refresh_catalog_if_due(force=False):
 
 
 async def handle_photo_capture_request(source_ws=None):
+    """
+    Execute photo capture workflow and persist capture metadata into shared telemetry.
+    """
     target_id = state.data["mission"].get("target", "STANDBY")
     directory, output_path = build_capture_paths(target_id, "photo")
     directory.mkdir(parents=True, exist_ok=True)
@@ -2243,6 +2643,9 @@ async def handle_photo_capture_request(source_ws=None):
 
 
 async def handle_video_capture_request(duration, source_ws=None):
+    """
+    Execute video capture workflow and persist recording metadata/status into shared telemetry.
+    """
     target_id = state.data["mission"].get("target", "STANDBY")
     directory, output_path = build_capture_paths(target_id, "video")
     directory.mkdir(parents=True, exist_ok=True)
@@ -2264,10 +2667,16 @@ async def handle_video_capture_request(duration, source_ws=None):
 
 
 async def execute_command(pkt, source_ws=None):
+    """
+    Central command router: validates init gates, mutates shared state, and triggers motor/capture side effects.
+    """
     global catalog_refresh_deadline
+    # Packet type is the canonical switch key used by every frontend command path.
     ptype = pkt.get("type")
+    # When True, telemetry is rebroadcast at function end to reflect state mutations.
     should_broadcast = False
 
+    # During startup/init phases, only an allowlist of commands may pass.
     if not is_command_allowed_during_init(ptype):
         if not refresh_system_status():
             if source_ws is not None:
@@ -2281,6 +2690,7 @@ async def execute_command(pkt, source_ws=None):
             return
 
     if ptype == "JOYSTICK":
+        # Real-time joystick vector updates (already privilege-gated upstream).
         data = pkt.get("data", {})
         state.data["joystick"] = {
             "x": float(data.get("x", 0.0)),
@@ -2289,12 +2699,14 @@ async def execute_command(pkt, source_ws=None):
         should_broadcast = True
 
     elif ptype == "EMERGENCY_STOP":
+        # Hard safety stop: transitions mission action and closes active sessions.
         state.data["mission"]["action"] = "EMERGENCY_STOP"
         state.action_expires_at = None
         await trigger_emergency_stop()
         return
 
     elif ptype == "MISSION":
+        # Mission updates are validated against currently visible catalog targets.
         requested_target = pkt.get("target", "STANDBY")
         if requested_target != "STANDBY":
             visible_ids = {
@@ -2326,6 +2738,7 @@ async def execute_command(pkt, source_ws=None):
         should_broadcast = True
 
     elif ptype == "COMMAND":
+        # High-level action command wrapper (photo/video/manual action switch).
         action = pkt.get("action", "--")
         if action == "PHOTO":
             should_broadcast = await handle_photo_capture_request(source_ws=source_ws)
@@ -2341,6 +2754,7 @@ async def execute_command(pkt, source_ws=None):
             should_broadcast = True
 
     elif ptype == "GPS_UPDATE":
+        # GPS sync updates observer coordinates and invalidates catalog refresh deadline.
         data = pkt.get("data", pkt)
         state.data["gps"] = {
             "lat": float(data.get("lat", 0.0) or 0.0),
@@ -2357,6 +2771,7 @@ async def execute_command(pkt, source_ws=None):
         should_broadcast = True
 
     elif ptype in {"SYNC_CLOCK", "TIMESTAMP", "DATETIME"}:
+        # Time sync updates both local runtime clock and astronomy runtime epoch.
         timestamp_ms = pkt.get("timestamp")
         if timestamp_ms is None:
             timestamp_ms = pkt.get("data")
@@ -2379,6 +2794,7 @@ async def execute_command(pkt, source_ws=None):
         should_broadcast = True
 
     elif ptype == "CAMERA_SETTINGS":
+        # Camera settings are bounded and pushed into live capture backend.
         camera = state.data["camera"]
         payload = pkt.get("data", {})
         if "exposure" in payload:
@@ -2392,6 +2808,7 @@ async def execute_command(pkt, source_ws=None):
         should_broadcast = True
 
     elif ptype == "MOTOR_SETTINGS":
+        # Tracking feature toggles (camera offsets + earth rotation compensation).
         motor = state.data["motor"]
         payload = pkt.get("data", {})
         if "tracking_with_camera" in payload:
@@ -2403,6 +2820,7 @@ async def execute_command(pkt, source_ws=None):
         should_broadcast = True
 
     elif ptype == "FOCUS_SETTINGS":
+        # Focus controls support both percent and absolute tick-domain updates.
         focus = state.data["focus"]
         payload = pkt.get("data", {})
         if payload.get("mode") in {"auto", "manual"}:
@@ -2432,6 +2850,7 @@ async def execute_command(pkt, source_ws=None):
         should_broadcast = True
 
     elif ptype in {"AUTOFOCUS_RECALIBRATE", "AUTOFOCUS_TEST"}:
+        # Software autofocus kickoff path (normal mode or focus-only diagnostic mode).
         force_focus_only = bool(
             ptype == "AUTOFOCUS_TEST"
             or pkt.get("force_focus_only")
@@ -2462,15 +2881,18 @@ async def execute_command(pkt, source_ws=None):
         should_broadcast = True
 
     elif ptype == "VIDEO_REQUEST":
+        # Direct video request shortcut from UI.
         duration = clamp(int(pkt.get("duration", 10)), 1, 3600)
         should_broadcast = await handle_video_capture_request(
             duration=duration, source_ws=source_ws
         )
 
     elif ptype == "PHOTO_REQUEST":
+        # Direct photo request shortcut from UI.
         should_broadcast = await handle_photo_capture_request(source_ws=source_ws)
 
     elif ptype == "RUNTIME_MODES":
+        # Runtime mode toggles (simulation flags, camera mode notice).
         payload = pkt.get("data", {})
         modes = state.data.get("runtime_modes", {})
         if "simulate_arduino" in payload:
@@ -2496,6 +2918,7 @@ async def execute_command(pkt, source_ws=None):
         should_broadcast = True
 
     elif ptype == "SERIAL_RAW":
+        # Manual/raw serial passthrough for debugging firmware interactions.
         command = str(pkt.get("command", "")).strip()
         sent = False
         if astro_runtime is not None and command:
@@ -2517,11 +2940,15 @@ async def execute_command(pkt, source_ws=None):
             )
         should_broadcast = False
 
+    # Keep client telemetry consistent after mutating any shared runtime state.
     if should_broadcast:
         await broadcast_telemetry()
 
 
 async def handle_request_response(ws, pkt):
+    """
+    Apply commander/bridge decision to a pending request and execute corresponding approval outcome.
+    """
     if not state.can_admin(ws):
         return
 
@@ -2591,6 +3018,9 @@ async def handle_request_response(ws, pkt):
 
 
 async def handle_websocket(request):
+    """
+    Primary websocket session handler for auth, approval workflow, command routing, and disconnect cleanup.
+    """
     ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
 
@@ -2609,18 +3039,21 @@ async def handle_websocket(request):
 
     try:
         async for msg in ws:
+            # Only textual websocket frames are part of this JSON protocol.
             if msg.type != WSMsgType.TEXT:
                 continue
 
             try:
                 pkt = json.loads(msg.data)
             except json.JSONDecodeError:
+                # Ignore malformed frames instead of dropping the client.
                 continue
 
             record_exchange("rx", pkt, ws=ws, delivered=True)
             ptype = pkt.get("type")
 
             if ptype == "LOGIN_BRIDGE":
+                # Bridge login upgrades this session to admin-like bridge role.
                 if pkt.get("pin") != BRIDGE_PIN:
                     await safe_send(ws, {"type": "LOGIN_FAIL"})
                     continue
@@ -2636,11 +3069,13 @@ async def handle_websocket(request):
                 continue
 
             if ptype == "SET_NAME":
+                # Lightweight profile/name updates for UI presence.
                 state.set_client_name(ws, pkt.get("name", "Anon"))
                 await broadcast_system_info()
                 continue
 
             if ptype == "REQUEST_COMMANDER":
+                # Request commander ownership directly or via queue workflow.
                 if state.is_bridge(ws):
                     continue
                 name = pkt.get("name", state.client_name(ws) or "Anon")
@@ -2685,6 +3120,7 @@ async def handle_websocket(request):
                 continue
 
             if ptype == "SET_COMMANDER":
+                # Bridge-only forced commander reassignment.
                 if not state.is_bridge(ws):
                     continue
                 try:
@@ -2704,6 +3140,7 @@ async def handle_websocket(request):
                 continue
 
             if ptype == "REQUEST_ACTION":
+                # Observer action requiring commander approval.
                 request_id = state.next_request_id()
                 state.pending_requests[request_id] = {
                     "kind": "ACTION_REQUEST",
@@ -2716,6 +3153,7 @@ async def handle_websocket(request):
                 continue
 
             if ptype == "REQUEST_JOYSTICK":
+                # Joystick privilege request path (direct grant or queued approval).
                 duration = clamp(int(pkt.get("duration", 30)), 10, 3600)
 
                 if state.is_commander(ws):
@@ -2771,42 +3209,51 @@ async def handle_websocket(request):
                 continue
 
             if ptype == "CMD_RESPONSE":
+                # Commander/bridge decision for a pending request.
                 await handle_request_response(ws, pkt)
                 continue
 
             if ptype == "TOGGLE_MUTE":
+                # Commander/bridge controls request popup mute behavior.
                 if state.can_admin(ws):
                     state.mute_notifications = bool(pkt.get("mute", False))
                     await broadcast_system_info()
                 continue
 
             if ptype == "JOYSTICK_QUEUE_MANAGE":
+                # Queue reorder/remove actions from bridge/commander tooling.
                 await manage_joystick_queue(ws, pkt)
                 continue
 
             if ptype == "JOYSTICK_OWNER_TIME":
+                # Lease extension/reduction actions for active joystick owner.
                 await adjust_joystick_owner_duration(ws, pkt)
                 continue
 
             if ptype == "REVOKE_JOYSTICK":
+                # Admin revoke command.
                 if state.can_admin(ws):
                     await revoke_joystick(reason="revoked_by_admin", advance_queue=True)
                 continue
 
             if ptype == "RELEASE_JOYSTICK":
+                # Owner/admin voluntary release command.
                 if ws == state.joystick_owner or state.can_admin(ws):
                     await revoke_joystick(reason="released", advance_queue=True)
                 continue
 
             if ptype == "JOYSTICK":
+                # High-frequency joystick vectors: strictly gated by ownership/commander.
                 if ws == state.joystick_owner or state.is_commander(ws):
                     await execute_command(pkt, source_ws=ws)
                 continue
 
+            # Fallback: all other command types require commander/bridge privileges.
             if state.can_admin(ws) or state.is_commander(ws):
                 await execute_command(pkt, source_ws=ws)
 
     finally:
+        # Ensure ownership/queues are repaired even on abrupt disconnect.
         lost_owner = ws == state.joystick_owner
         state.unregister(ws)
         if lost_owner:
@@ -2818,6 +3265,9 @@ async def handle_websocket(request):
 
 
 async def video_feed(request):
+    """
+    Serve MJPEG stream endpoint consumed by WebUI live-preview widgets.
+    """
     response = web.StreamResponse(
         status=200,
         reason="OK",
@@ -2849,24 +3299,36 @@ async def video_feed(request):
 
 
 async def page_root(request):
+    """
+    Serve emergency or remote page depending on global safety-stop state.
+    """
     if state.emergency_stop:
         return web.FileResponse("./public/emergency.html")
     return web.FileResponse("./public/remote.html")
 
 
 async def page_remote(request):
+    """
+    Serve remote control page when not in emergency-stop mode.
+    """
     if state.emergency_stop:
         raise web.HTTPFound("/")
     return web.FileResponse("./public/remote.html")
 
 
 async def page_bridge(request):
+    """
+    Serve bridge/admin page when not in emergency-stop mode.
+    """
     if state.emergency_stop:
         raise web.HTTPFound("/")
     return web.FileResponse("./public/bridge.html")
 
 
 async def debug_state(request):
+    """
+    Expose consolidated runtime debug snapshot over HTTP for diagnostics.
+    """
     snapshot = {
         "ts": utc_now_iso(),
         "data": state.data,
@@ -2880,6 +3342,9 @@ async def debug_state(request):
 
 
 async def debug_exchanges(request):
+    """
+    Expose bounded packet exchange log for UI/network debugging.
+    """
     try:
         limit = int(request.query.get("limit", "200"))
     except ValueError:
@@ -2888,6 +3353,9 @@ async def debug_exchanges(request):
 
 
 async def debug_serial(request):
+    """
+    Expose bounded serial RX/TX and motor-link status diagnostics.
+    """
     try:
         limit = int(request.query.get("limit", "200"))
     except ValueError:
@@ -2915,6 +3383,9 @@ async def debug_serial(request):
 
 
 async def debug_serial_send(request):
+    """
+    Forward raw interactive serial commands via debug endpoint and report send status.
+    """
     if astro_runtime is None:
         return web.json_response({"ok": False, "error": "Astronomic runtime unavailable."}, status=503)
     try:
@@ -2932,6 +3403,9 @@ async def debug_serial_send(request):
 
 
 async def debug_vision(request):
+    """
+    Expose detailed autofocus debug state/history/event traces for analysis.
+    """
     try:
         event_limit = int(request.query.get("event_limit", "500"))
     except ValueError:
@@ -2956,6 +3430,12 @@ async def debug_vision(request):
 
 
 async def handle_runtime_orchestration(vision_payload):
+    """
+    Coordinate startup calibration handshake, firmware ACK processing, and autofocus orchestration against motor link events.
+    """
+    # Main hardware/vision orchestration checkpoint.
+    # This function is intentionally centralized so startup retries, firmware
+    # acknowledgements, and autofocus sequencing stay in one place.
     if astro_runtime is None:
         return
     if runtime_orchestrator.focus_only_mode:
@@ -2964,11 +3444,13 @@ async def handle_runtime_orchestration(vision_payload):
         runtime_orchestrator.hw_calibrated = True
 
     link = astro_runtime.motor_link
+    # Pull a bounded chunk of serial/motor-link events each loop tick.
     events = link.drain_events(limit=200)
     boot_seen = False
     calibration_progress_seen = False
     calibration_ready_seen = False
 
+    # First pass over debug lines: infer coarse firmware state transitions.
     for event in events:
         if event.get("kind") != "debug":
             continue
@@ -2982,6 +3464,7 @@ async def handle_runtime_orchestration(vision_payload):
         if "mount=ready" in line_lower or "calibration_done" in line_lower:
             calibration_ready_seen = True
 
+    # Firmware reboot/boot banner means all calibration/autofocus handshakes must restart.
     if boot_seen:
         had_runtime_state = bool(
             runtime_orchestrator.hw_calibration_requested
@@ -2993,6 +3476,7 @@ async def handle_runtime_orchestration(vision_payload):
         if had_runtime_state:
             print("[HW CAL] Arduino boot/reset detected; restarting initialization pipeline.")
 
+    # Second pass over ACK events: update explicit calibration handshake state machine.
     for event in events:
         if event.get("kind") != "ack":
             continue
@@ -3035,6 +3519,7 @@ async def handle_runtime_orchestration(vision_payload):
             runtime_orchestrator.hw_calibration_accepted = False
             runtime_orchestrator.hw_next_retry_at = event_now + 1.0
 
+    # If firmware reports ERROR after calibration, force controlled handshake reset.
     now = time.monotonic()
     link_status = link.status()
     link_system_state = str(link_status.get("system_state", "")).upper()
@@ -3098,6 +3583,7 @@ async def handle_runtime_orchestration(vision_payload):
             runtime_orchestrator.hw_next_retry_at = now + 1.0
             print("Failed to send startup calibration command (3) to Arduino.")
 
+    # Watchdog: accepted calibration with no progress within timeout -> retry path.
     if (
         runtime_orchestrator.hw_calibration_requested
         and not runtime_orchestrator.hw_calibrated
@@ -3149,6 +3635,7 @@ async def handle_runtime_orchestration(vision_payload):
             print("[VISION] Autofocus calibration complete.")
         runtime_orchestrator.focus_calibrated = True
 
+    # Apply final command gates used by astronomy runtime command emission.
     tracking_enabled = bool(
         runtime_orchestrator.hw_calibrated
         and astro_runtime.ready
@@ -3169,12 +3656,23 @@ async def handle_runtime_orchestration(vision_payload):
 
 
 async def background_state_loop(app):
+    """
+    Periodic runtime loop that advances clocks, vision/astro ticks, orchestration, catalog refresh, and broadcast cadence.
+    """
+    # High-frequency runtime loop:
+    # - updates camera/vision snapshots
+    # - runs orchestration and astronomy tick
+    # - refreshes catalogs/system flags
+    # - pushes telemetry/system packets to UI clients
     last_telemetry_push = 0.0
     last_system_info_push = 0.0
     while True:
+        # Keep software clock moving even without explicit client sync packets.
         state.update_clock()
+        # Expire temporary action labels (PHOTO/VIDEO) once their display window ends.
         state.clear_temporary_action_if_needed()
 
+        # Pull latest camera frame for vision scoring and tracking-offset extraction.
         frame = cam.get_raw_frame_copy()
         vision_runtime.update_from_frame(frame)
         # Orchestration can change autofocus state (commands/acks), so we refresh
@@ -3185,6 +3683,7 @@ async def background_state_loop(app):
 
         if astro_runtime is not None:
             try:
+                # Feed camera-derived offsets + focus state into astronomy planner.
                 astro_runtime.set_tracking_error(
                     dx=vision_payload.get("dx", 0.0),
                     dy=vision_payload.get("dy", 0.0),
@@ -3198,10 +3697,12 @@ async def background_state_loop(app):
                     current_step=vision_payload.get("current_step", 0.0),
                     manual_ticks=state.data.get("focus", {}).get("manual_ticks"),
                 )
+                # Tick astronomy operator to generate motor commands from target+offsets.
                 astro_runtime.tick(state.data)
             except Exception as exc:
                 print(f"Astronomic tick failed: {exc}")
 
+        # Mirror recorder worker state into telemetry for UI status chips.
         recording_status = cam.recording_status()
         state.data["capture"]["recording"] = bool(recording_status["active"])
         if recording_status["last_error"]:
@@ -3211,6 +3712,7 @@ async def background_state_loop(app):
 
         refresh_system_status()
 
+        # Auto-revoke joystick lease when countdown reaches zero.
         if (
             state.joystick_owner is not None
             and state.joystick_expires_at is not None
@@ -3227,12 +3729,22 @@ async def background_state_loop(app):
             await broadcast_system_info()
             last_system_info_push = now
 
+        # Fixed-cycle pacing for this coordinator loop.
         await asyncio.sleep(BACKGROUND_LOOP_INTERVAL_S)
 
 
 async def start_background_tasks(app):
+    """
+    Startup lifecycle hook: initialize runtimes, synchronize initial state, and launch background orchestration loop.
+    """
+    # Startup bootstrap:
+    # 1) initialize logs/runtime modes
+    # 2) create astronomy runtime + initial sync
+    # 3) initialize focus settings/catalog state
+    # 4) launch background state loop
     global astro_runtime, catalog_refresh_deadline, catalog_last_hash
     runtime_orchestrator.reset()
+    # Ensure all runtime log/storage targets exist before subsystems start writing.
     CAPTURE_ROOT.mkdir(parents=True, exist_ok=True)
     EXCHANGE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     EXCHANGE_LOG_FILE.touch(exist_ok=True)
@@ -3242,6 +3754,7 @@ async def start_background_tasks(app):
     VISION_DEBUG_LOG_FILE.touch(exist_ok=True)
 
     env_sim_arduino = os.environ.get("STARTRACK_SIM_ARDUINO", "").strip().lower()
+    # `STARTRACK_SIM_ARDUINO` overrides mode-based default when explicitly set.
     if env_sim_arduino in {"1", "true", "yes", "on"}:
         simulate_arduino = True
     elif env_sim_arduino in {"0", "false", "no", "off"}:
@@ -3255,6 +3768,7 @@ async def start_background_tasks(app):
     }
 
     requested_port = os.environ.get("STARTRACK_ARDUINO_PORT", "auto").strip()
+    # Support explicit serial port overrides; otherwise auto-detect likely Arduino port.
     if requested_port.lower() == "auto":
         arduino_port = detect_arduino_port("COM6" if os.name == "nt" else "/dev/ttyUSB0")
     else:
@@ -3264,6 +3778,7 @@ async def start_background_tasks(app):
 
     if AstronomicOperator is not None:
         try:
+            # Instantiate astronomy runtime with shared catalog + serial configuration.
             astro_runtime = AstronomicOperator(
                 base_catalog=CATALOG,
                 latitude=state.data["gps"]["lat"],
@@ -3284,6 +3799,7 @@ async def start_background_tasks(app):
 
     if astro_runtime is not None:
         try:
+            # Immediately seed astronomy runtime with current GPS/time values.
             astro_runtime.set_location(
                 state.data["gps"]["lat"],
                 state.data["gps"]["lon"],
@@ -3297,6 +3813,7 @@ async def start_background_tasks(app):
             print(f"Astronomic runtime initial sync failed: {exc}")
 
     focus_cfg = state.data.get("focus", {})
+    # Normalize legacy/manual focus fields to consistent tick+percent representation.
     if "manual_ticks" not in focus_cfg:
         focus_cfg["manual_ticks"] = int(
             round((float(focus_cfg.get("manual_value", 50)) / 100.0) * vision_runtime.TOTAL_FOCUS_STEPS)
@@ -3315,6 +3832,7 @@ async def start_background_tasks(app):
         state.data["focus"]["mode"], state.data["focus"]["manual_value"]
     )
     if astro_runtime is not None:
+        # Start with gates closed until hardware+focus orchestration opens them.
         astro_runtime.set_command_gates(
             hardware_ready=False,
             focus_ready=False,
@@ -3337,6 +3855,10 @@ async def start_background_tasks(app):
 
 
 async def cleanup_background_tasks(app):
+    """
+    Shutdown lifecycle hook: cancel async loop and close astronomy/serial resources gracefully.
+    """
+    # Graceful shutdown for async background loop and serial runtime.
     app["state_loop"].cancel()
     try:
         await app["state_loop"]
