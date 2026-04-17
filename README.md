@@ -44,7 +44,7 @@ Control your telescope from a clean and intuitive interface.
 
 ---
 
-### 🌌 Celestial Object Detection
+### 🌌 Celestial Object Alignment
 Automatically detect and select stars and planets.
 
 https://github.com/user-attachments/assets/3bd77a46-6f4f-4f7e-8b46-55b38fbb0885
